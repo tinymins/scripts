@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 
-logging.basicConfig(filename='arrange-files.log', encoding='utf-8', level=logging.DEBUG)
+logging.basicConfig(filename='remove-empty-dirs.log', encoding='utf-8', level=logging.DEBUG)
 logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 root_path = "."
