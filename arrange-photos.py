@@ -30,7 +30,7 @@ for cwd, dirs, files in os.walk(root_path):
                     break
         if not os.path.isfile(mtime_file_path):
             continue
-        mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+        mtime = datetime.fromtimestamp(os.path.getmtime(mtime_file_path))
         new_filepath_without_ext = os.path.abspath(os.path.join(
             root_path,
             mtime.strftime('%Y') + 'Q' + str(math.floor((int(mtime.strftime('%m')) + 2) / 3)),
