@@ -7,7 +7,7 @@ from datetime import datetime
 logging.basicConfig(filename='arrange-photos.log', encoding='utf-8', level=logging.DEBUG)
 logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-PHOTO_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif"]
+PHOTO_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".tga", ".heic"]
 VIDEO_EXTENSIONS = [".mp4", ".mov"]
 ALL_EXTENSIONS = PHOTO_EXTENSIONS + VIDEO_EXTENSIONS
 
