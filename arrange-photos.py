@@ -48,7 +48,7 @@ for cwd, dirs, files in os.walk(root_path):
                 if os.path.isfile(new_filepath_without_ext + conflict_string + ext):
                     conflict_pass = False
                     conflict_number = conflict_number + 1
-                    conflict_string = '_' + conflict_number
+                    conflict_string = '_' + str(conflict_number)
                     break
 
         for ext in ALL_EXTENSIONS:
