@@ -45,21 +45,25 @@ for cwd, dirs, files in os.walk(root_path):
         while not conflict_pass:
             conflict_pass = True
             for ext in ALL_EXTENSIONS:
-                if os.path.isfile(new_filepath_without_ext + conflict_string + ext):
+                if os.path.isfile(new_filepath_without_ext + conflict_string + ext) and new_filepath_without_ext + conflict_string + ext != filepath:
                     conflict_pass = False
                     conflict_number = conflict_number + 1
                     conflict_string = '_' + str(conflict_number)
                     break
+        new_filepath_without_ext = new_filepath_without_ext + conflict_string
+
+        if new_filepath_without_ext == filepath_without_ext:
+            continue
 
         for ext in ALL_EXTENSIONS:
             if os.path.isfile(filepath_without_ext + ext):
-                print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + conflict_string + ext)
-                pardir = os.path.abspath(os.path.join(new_filepath_without_ext + conflict_string, os.pardir))
+                print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext)
+                pardir = os.path.abspath(os.path.join(new_filepath_without_ext, os.pardir))
                 if not os.path.isdir(pardir):
                     logging.info('Makedir: ' + pardir)
                     os.makedirs(pardir)
-                logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + conflict_string + ext)
-                os.rename(filepath_without_ext + ext, new_filepath_without_ext + conflict_string + ext)
+                logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext)
+                os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
 
 for cwd, dirs, files in os.walk(root_path, False):
     for dirname in dirs:
