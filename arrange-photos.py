@@ -53,13 +53,13 @@ for cwd, dirs, files in os.walk(root_path):
 
         for ext in ALL_EXTENSIONS:
             if os.path.isfile(filepath_without_ext + ext):
-                print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext)
-                pardir = os.path.abspath(os.path.join(new_filepath_without_ext, os.pardir))
+                print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + conflict_string + ext)
+                pardir = os.path.abspath(os.path.join(new_filepath_without_ext + conflict_string, os.pardir))
                 if not os.path.isdir(pardir):
                     logging.info('Makedir: ' + pardir)
                     os.makedirs(pardir)
-                logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext)
-                os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
+                logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + conflict_string + ext)
+                os.rename(filepath_without_ext + ext, new_filepath_without_ext + conflict_string + ext)
 
 for cwd, dirs, files in os.walk(root_path, False):
     for dirname in dirs:
