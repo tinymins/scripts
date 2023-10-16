@@ -83,13 +83,13 @@ def run(root_path, only_exif=True, dry_run=False):
 
             for ext in ALL_EXTENSIONS:
                 if os.path.isfile(filepath_without_ext + ext):
-                    print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                     pardir = os.path.abspath(os.path.join(new_filepath_without_ext, os.pardir))
                     if not os.path.isdir(pardir):
                         print('Makedir: ' + pardir)
                         if not dry_run:
                             logging.info('Makedir: ' + pardir)
                             os.makedirs(pardir)
+                    print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                     if not dry_run:
                         logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                         os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
