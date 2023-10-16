@@ -30,7 +30,7 @@ def get_mtime(mtime_file_path):
     return (datetime.fromtimestamp(os.path.getmtime(mtime_file_path)), "FILE_MTime")
 
 
-def run(root_path, dry_run=False):
+def run(root_path, only_exif=True, dry_run=False):
     if not dry_run:
         logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     for cwd, dirs, files in os.walk(root_path):
@@ -53,6 +53,9 @@ def run(root_path, dry_run=False):
                 continue
 
             (mtime, mtimetype) = get_mtime(mtime_file_path)
+            if only_exif and mtimetype != "EXIF_CTime":
+                continue
+
             new_filepath_without_ext = os.path.abspath(os.path.join(
                 root_path,
                 mtime.strftime('%Y') + 'Q' + str(math.floor((int(mtime.strftime('%m')) + 2) / 3)),
@@ -110,12 +113,13 @@ def run(root_path, dry_run=False):
 if __name__ == '__main__':
     parser = OptionParser()
     parser.add_option('--dry-run', action='store_true', dest='dry_run', help='Dry run')
+    parser.add_option('--only-exif', action='store_true', dest='only_exif', help='Only arrange files with EXIF')
     (options, args) = parser.parse_args()
     if len(args) != 1:
         parser.error("incorrect number of arguments")
     if options.dry_run:
         print("> DRY RUN MODE")
     try:
-        run(args[0], options.dry_run)
+        run(args[0], options.only_exif, options.dry_run)
     except KeyboardInterrupt:
         exit()
