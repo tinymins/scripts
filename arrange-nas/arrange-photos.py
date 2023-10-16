@@ -8,7 +8,8 @@ from pillow_heif import register_heif_opener
 from datetime import datetime
 from optparse import OptionParser
 
-logging.basicConfig(filename='arrange-photos.log', encoding='utf-8', level=logging.DEBUG)
+logging_file = os.path.abspath(os.path.splitext(__file__)[0] + '.log')
+logging.basicConfig(filename=logging_file, encoding='utf-8', level=logging.DEBUG)
 register_heif_opener()
 
 PHOTO_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".tga", ".heic"]

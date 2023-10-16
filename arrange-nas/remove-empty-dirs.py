@@ -3,7 +3,8 @@ import logging
 from datetime import datetime
 from optparse import OptionParser
 
-logging.basicConfig(filename='remove-empty-dirs.log', encoding='utf-8', level=logging.DEBUG)
+logging_file = os.path.abspath(os.path.splitext(__file__)[0] + '.log')
+logging.basicConfig(filename=logging_file, encoding='utf-8', level=logging.DEBUG)
 
 
 def run(root_path, dry_run=False):

@@ -5,8 +5,8 @@ import logging
 import re
 from datetime import datetime
 
-logging.basicConfig(filename='arrange-files.log', encoding='utf-8', level=logging.DEBUG)
-logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+logging_file = os.path.abspath(os.path.splitext(__file__)[0] + '.log')
+logging.basicConfig(filename=logging_file, encoding='utf-8', level=logging.DEBUG)
 
 ALL_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".tga", ".heic", ".mp4", ".mov"]
 
