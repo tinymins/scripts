@@ -9,7 +9,6 @@ from datetime import datetime
 from optparse import OptionParser
 
 logging.basicConfig(filename='arrange-photos.log', encoding='utf-8', level=logging.DEBUG)
-logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 register_heif_opener()
 
 PHOTO_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".tga", ".heic"]
@@ -31,7 +30,9 @@ def get_mtime(mtime_file_path):
     return (datetime.fromtimestamp(os.path.getmtime(mtime_file_path)), "FILE_MTime")
 
 
-def run(root_path):
+def run(root_path, dry_run=False):
+    if not dry_run:
+        logging.info('Start: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     for cwd, dirs, files in os.walk(root_path):
         for filename in files:
             file_ext = pathlib.Path(filename).suffix.lower()
@@ -83,7 +84,7 @@ def run(root_path):
                     if not os.path.isdir(pardir):
                         logging.info('Makedir: ' + pardir)
                         os.makedirs(pardir)
-                    if not options.dry_run:
+                    if not dry_run:
                         logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                         os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
 
@@ -99,7 +100,7 @@ def run(root_path):
                     break
             if is_empty and os.path.isdir(dirpath):
                 print("Remove: " + dirpath)
-                if not options.dry_run:
+                if not dry_run:
                     logging.info('Remove: ' + dirpath)
                     os.rmdir(dirpath)
 
@@ -113,6 +114,6 @@ if __name__ == '__main__':
     if options.dry_run:
         print("> DRY RUN MODE")
     try:
-        run(args[0])
+        run(args[0], options.dry_run)
     except KeyboardInterrupt:
         exit()
