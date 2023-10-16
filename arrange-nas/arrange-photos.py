@@ -85,7 +85,7 @@ def run(root_path):
                         os.makedirs(pardir)
                     if not options.dry_run:
                         logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
-                        os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
+                        os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
 
     for cwd, dirs, files in os.walk(root_path, False):
         for dirname in dirs:
