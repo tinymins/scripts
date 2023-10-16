@@ -82,8 +82,10 @@ def run(root_path, dry_run=False):
                     print("Arrange: " + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                     pardir = os.path.abspath(os.path.join(new_filepath_without_ext, os.pardir))
                     if not os.path.isdir(pardir):
-                        logging.info('Makedir: ' + pardir)
-                        os.makedirs(pardir)
+                        print('Makedir: ' + pardir)
+                        if not dry_run:
+                            logging.info('Makedir: ' + pardir)
+                            os.makedirs(pardir)
                     if not dry_run:
                         logging.info('Arrange: ' + filepath_without_ext + ext + " => " + new_filepath_without_ext + ext + " (USING " + mtimetype + ")")
                         os.rename(filepath_without_ext + ext, new_filepath_without_ext + ext)
