@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 提示用户输入序列号
-read -p "请输入NVMe设备的序列号: " target_serial
+read -p "请输入NVMe设备的序列号: " target_serial < /dev/tty
 
 # 遍历 /sys/class/nvme 下的所有 NVMe 设备
 for nvme in /sys/class/nvme/nvme*; do
