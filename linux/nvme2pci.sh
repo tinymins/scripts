@@ -10,13 +10,13 @@ for nvme in /sys/class/nvme/nvme*; do
 
     # 如果序列号匹配
     if [ "$serial" == "$target_serial" ]; then
-        # 获取设备的符号链接目标，也就是PCI地址相对路径
+        # 获取设备的符号链接目标
         symlink_target=$(readlink "$nvme")
 
-        # 计算PCI地址
-        pci_address=$(echo "$symlink_target" | awk -F'/' '{for(i=1;i<=NF;i++) if($i ~ /^0000:/) print $i}')
+        # 提取完整的PCI地址路径，不包括 /devices 和 /nvme 部分
+        pci_address=$(echo "$symlink_target" | sed -n 's|.*\(pci0000:.*\)|\1|p')
 
-        echo "找到的 PCI 地址: $pci_address"
+        echo "找到的 PCI 地址路径: $pci_address"
         exit 0
     fi
 done
