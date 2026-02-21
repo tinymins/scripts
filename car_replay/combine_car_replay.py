@@ -1,8 +1,125 @@
+import argparse
 import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
+
+# ============================================================
+# 压缩参数配置 - 测试确认后可修改此处
+# ============================================================
+
+COMPRESS_PROFILES = {
+    "AA": {  # 4K 前摄 3840x2160, 原始 ~30Mbps
+        "cq": 32,
+        "bitrate": "8M",
+        "maxrate": "12M",
+        "bufsize": "16M",
+        "preset": "p5",
+    },
+    "AB": {  # 1080p 后摄, 原始 ~8.4Mbps
+        "cq": 32,
+        "bitrate": "3M",
+        "maxrate": "5M",
+        "bufsize": "8M",
+        "preset": "p5",
+    },
+    "AC": {  # 1080p 车内, 原始 ~8.4Mbps
+        "cq": 32,
+        "bitrate": "3M",
+        "maxrate": "5M",
+        "bufsize": "8M",
+        "preset": "p5",
+    },
+}
+
+DEFAULT_PROFILE = {
+    "cq": 32,
+    "bitrate": "5M",
+    "maxrate": "8M",
+    "bufsize": "10M",
+    "preset": "p5",
+}
+
+# ffmpeg 路径
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FFMPEG = os.path.join(SCRIPT_DIR, "..", "ffmpeg.exe")
+
+
+def get_compress_profile(camera_id, cq_override=None):
+    """根据通道ID获取压缩参数"""
+    profile = COMPRESS_PROFILES.get(camera_id, DEFAULT_PROFILE).copy()
+    if cq_override is not None:
+        profile["cq"] = cq_override
+    return profile
+
+
+def format_size(size_bytes):
+    """格式化文件大小"""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024**3):.2f} GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024**2):.1f} MB"
+    return f"{size_bytes / 1024:.1f} KB"
+
+
+def compress_video(input_path, output_path, camera_id, cq_override=None):
+    """
+    使用 hevc_nvenc 压缩视频文件。
+    input_path: 输入文件（合并后的临时文件或单个源文件）
+    output_path: 最终输出路径
+    camera_id: 通道ID，用于选择压缩参数
+    返回 True/False
+    """
+    profile = get_compress_profile(camera_id, cq_override)
+    input_size = os.path.getsize(input_path)
+
+    print(f"  Compressing [{camera_id or '??'}] CQ{profile['cq']}...")
+
+    temp_output = output_path + ".compress_tmp.mp4"
+
+    cmd = [
+        FFMPEG,
+        "-y",
+        "-hwaccel", "cuda",
+        "-i", input_path,
+        "-c:v", "hevc_nvenc",
+        "-preset", profile["preset"],
+        "-rc", "vbr",
+        "-cq", str(profile["cq"]),
+        "-b:v", profile["bitrate"],
+        "-maxrate", profile["maxrate"],
+        "-bufsize", profile["bufsize"],
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        temp_output,
+    ]
+
+    start_time = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    elapsed = time.time() - start_time
+
+    if result.returncode != 0:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        print(f"  ERROR: Compression failed! {result.stderr[-300:]}")
+        return False
+
+    # 重命名为最终文件
+    if os.path.exists(output_path):
+        os.remove(output_path)
+    os.rename(temp_output, output_path)
+
+    output_size = os.path.getsize(output_path)
+    ratio = input_size / output_size if output_size > 0 else 0
+    saving = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+    print(
+        f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
+        f"({ratio:.1f}x, -{saving:.0f}%) in {elapsed:.1f}s"
+    )
+    return True
+
 
 class VideoInfo:
     def __init__(self, datetime_obj=None, rest_of_filename=None, max_time_difference=None):
@@ -115,15 +232,30 @@ def create_combined_filename(first_video, last_video):
 
     return f"{first_timestamp}_{last_timestamp}_{first_info.rest_of_filename}"
 
-def merge_videos(video_group, combined_file):
+def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None):
     # 获取最后一个视频文件的时间属性
     last_video = video_group[-1]
     last_video_stats = os.stat(last_video)
     last_access_time = last_video_stats.st_atime
     last_mod_time = last_video_stats.st_mtime
 
-    if len(video_group) == 1:
-        # Copy the single file directly
+    # 获取通道ID（从第一个视频文件名提取）
+    camera_id = extract_camera_id(os.path.basename(video_group[0]))
+
+    if len(video_group) == 1 and enable_compress:
+        # 单文件 + 压缩：直接从源压缩到目标
+        print(f"Compressing single file: {video_group[0]} to {combined_file}")
+        success = compress_video(video_group[0], combined_file, camera_id, cq_override)
+        if success:
+            os.utime(combined_file, (last_access_time, last_mod_time))
+        else:
+            # 压缩失败时回退到直接复制
+            print("  Compression failed, falling back to copy...")
+            shutil.copy2(video_group[0], combined_file)
+        return
+
+    if len(video_group) == 1 and not enable_compress:
+        # 单文件 + 不压缩：直接复制
         print(f"Copying single file: {video_group[0]} to {combined_file}")
         shutil.copy2(video_group[0], combined_file)
         return
@@ -131,23 +263,40 @@ def merge_videos(video_group, combined_file):
     print(f"Merging {len(video_group)} files into: {combined_file}")
     print(f"Files to merge: {[os.path.basename(v) for v in video_group]}")
 
+    # 多文件场景：先合并(stream copy)再压缩
+    if enable_compress:
+        merge_target = combined_file + ".merge_tmp.mp4"
+    else:
+        merge_target = combined_file
+
     with open("concat_list.txt", "w") as f:
         for video in video_group:
             f.write(f"file '{video}'\n")
 
     command = [
-        'ffmpeg', '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt',
-        '-c', 'copy', combined_file
+        FFMPEG, '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt',
+        '-c', 'copy', merge_target
     ]
 
     subprocess.run(command, check=True)
     os.remove("concat_list.txt")
+    print("Merge complete.")
+
+    # 压缩步骤
+    if enable_compress:
+        success = compress_video(merge_target, combined_file, camera_id, cq_override)
+        # 删除合并临时文件
+        if os.path.exists(merge_target):
+            os.remove(merge_target)
+        if not success:
+            print("  Compression failed! Merged file was removed.")
+            return
 
     # 设置合并后文件的时间属性为最后一个视频文件的时间属性
     os.utime(combined_file, (last_access_time, last_mod_time))
-    print("Merge complete. File timestamps set to match the last video segment.")
+    print("File timestamps set to match the last video segment.")
 
-def process_videos_in_folder(src_folder, target_folder_base):
+def process_videos_in_folder(src_folder, target_folder_base, enable_compress=False, cq_override=None):
     mp4_files = []
     other_files = []
 
@@ -207,7 +356,7 @@ def process_videos_in_folder(src_folder, target_folder_base):
             print(f"Group contains {len(group)} files")
 
             if not check_file_exists(combined_file_path):
-                merge_videos(group, combined_file_path)
+                merge_videos(group, combined_file_path, enable_compress, cq_override)
             else:
                 print(f"Combined file already exists: {combined_file_path}, skipping...")
 
@@ -241,8 +390,40 @@ def process_videos_in_folder(src_folder, target_folder_base):
     print("\nAll processing completed successfully!")
 
 if __name__ == "__main__":
-    src_folder = input("Please enter the source folder path: ")
-    target_folder_base = os.path.join(os.path.dirname(src_folder), f'{os.path.basename(src_folder)}_Combined')
+    parser = argparse.ArgumentParser(description="行车记录仪视频合并（可选压缩）")
+    parser.add_argument("--src", type=str, help="源文件夹路径")
+    parser.add_argument("--compress", action="store_true", help="合并后进行NVENC压缩")
+    parser.add_argument("--no-compress", action="store_true", help="合并后不压缩")
+    parser.add_argument("--cq", type=int, help="全局覆盖CQ值（默认按通道使用预设值）")
+    args = parser.parse_args()
+
+    src_folder = args.src
+    if not src_folder:
+        src_folder = input("Please enter the source folder path: ").strip().strip('"')
+
+    # 确定是否启用压缩
+    if args.compress:
+        enable_compress = True
+    elif args.no_compress:
+        enable_compress = False
+    elif not args.src:
+        # 交互模式：默认启用压缩
+        compress_input = input("是否启用NVENC压缩？(Y/n): ").strip().lower()
+        enable_compress = compress_input != "n"
+    else:
+        # CLI模式未指定：默认不压缩（向后兼容）
+        enable_compress = False
+
+    target_folder_base = os.path.join(
+        os.path.dirname(src_folder), f"{os.path.basename(src_folder)}_Combined"
+    )
+
     print(f"Output files will be placed in: {target_folder_base}")
-    process_videos_in_folder(src_folder, target_folder_base)
-    os.system('pause')
+    if enable_compress:
+        cq_info = f"CQ override: {args.cq}" if args.cq else "使用通道默认值"
+        print(f"Compression ENABLED ({cq_info})")
+    else:
+        print("Compression DISABLED")
+
+    process_videos_in_folder(src_folder, target_folder_base, enable_compress, args.cq)
+    os.system("pause")
