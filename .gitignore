@@ -1,5 +1,6 @@
 /bak/
 /ff*
 /nir*
+/3rd-party/
 __pycache__/
 *.log
