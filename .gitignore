@@ -1,3 +1,5 @@
 /bak/
 /ff*
 /nir*
+__pycache__/
+*.log
