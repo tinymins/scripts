@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "scriptName=converter.mkv.h265.vbr-10000-15000.seq.bat"
-set "contextMenu=MKV H.265 VBR-10000-15000"
+set "scriptName=converter_mkv_h265_vbr_18000_25000_seq.bat"
+set "contextMenu=MKV H.265 VBR-18000-25000"
 
 :: 获取批处理文件的路径
 for %%I in ("%~dp0%scriptName%") do set "scriptPath=%%~fI"

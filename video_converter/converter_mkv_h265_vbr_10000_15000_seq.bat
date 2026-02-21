@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 %~d0
 cd %~dp0
 
-set "outputSuffix=.h264"
+set "outputSuffix=.h265"
 set "outputExtName=mkv"
 
 for %%I in (%*) do (
@@ -23,31 +23,38 @@ for %%I in (%*) do (
 
   echo Output File: "!outputFile!"
 
-  ffmpeg -i "!inputFile!" ^
+  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
     -map 0 ^
-    -c:v h264_nvenc ^
-    -b:v 18000k ^
-    -maxrate 25000k ^
+    -c:v hevc_nvenc ^
+    -b:v 10000k ^
+    -maxrate 15000k ^
     -rc:v vbr ^
     -preset p7 ^
-    -profile:v high ^
+    -tune hq ^
+    -profile:v main ^
+    -rc-lookahead 32 ^
+    -spatial_aq 1 ^
     -bf 4 ^
     -pass 1 ^
     -f null /dev/null
-  ffmpeg -i "!inputFile!" ^
+  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
     -map 0 ^
-    -c:v h264_nvenc ^
-    -b:v 18000k ^
-    -maxrate 25000k ^
+    -c:v hevc_nvenc ^
+    -b:v 10000k ^
+    -maxrate 15000k ^
     -rc:v vbr ^
     -preset p7 ^
-    -profile:v high ^
+    -tune hq ^
+    -profile:v main ^
+    -rc-lookahead 32 ^
+    -spatial_aq 1 ^
     -bf 4 ^
     -pass 2 ^
     -c:a copy ^
     "!outputFile!"
 
-  nircmd clonefiletime "!inputFile!" "!outputFile!"
+  @REM copy /B "!outputFile!" +,, & copy /B "!inputFile!" +,, "!outputFile!"
+  "%~dp0..\third_party\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
 )
 
 endlocal

@@ -1,0 +1,10 @@
+%~d0
+cd %~dp0
+
+call converter_mkv_h264_vbr_18000_25000_seq_install.bat
+call converter_mkv_h265_vbr_10000_15000_seq_install.bat
+call converter_mkv_h265_vbr_18000_25000_seq_install.bat
+call converter_mp4_h264_vbr_10000_15000_seq_install.bat
+call converter_mp4_h264_vbr_18000_25000_seq_install.bat
+
+pause

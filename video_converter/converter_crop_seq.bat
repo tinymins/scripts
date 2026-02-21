@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 %~d0
 cd %~dp0
 
-set "outputSuffix=.h264"
+set "outputSuffix=.crop"
 set "outputExtName=mp4"
 
 for %%I in (%*) do (
@@ -23,32 +23,12 @@ for %%I in (%*) do (
 
   echo Output File: "!outputFile!"
 
-  ffmpeg -i "!inputFile!" ^
-    -map 0 ^
-    -c:v h264_nvenc ^
-    -b:v 18000k ^
-    -maxrate 25000k ^
-    -rc:v vbr ^
-    -preset p7 ^
-    -profile:v high ^
-    -bf 4 ^
-    -pass 1 ^
-    -f null /dev/null
-  ffmpeg -i "!inputFile!" ^
-    -map 0 ^
-    -c:v h264_nvenc ^
-    -b:v 18000k ^
-    -maxrate 25000k ^
-    -rc:v vbr ^
-    -preset p7 ^
-    -profile:v high ^
-    -bf 4 ^
-    -pass 2 ^
-    -c:a copy ^
+  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
+    -vf "crop=1280:590:0:130" ^
     "!outputFile!"
 
   @REM copy /B "!outputFile!" +,, & copy /B "!inputFile!" +,, "!outputFile!"
-  nircmd clonefiletime "!inputFile!" "!outputFile!"
+  "%~dp0..\third_party\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
 )
 
 endlocal

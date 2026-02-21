@@ -28,8 +28,8 @@ SOURCE_DIR = r"\\10.8.28.10\iot\360CAR_Combined\360CARDVR\REC"
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compress_test")
 
 # ffmpeg 路径（与本脚本同目录）
-FFMPEG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffmpeg.exe")
-FFPROBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffprobe.exe")
+FFMPEG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "third_party", "ffmpeg", "ffmpeg.exe")
+FFPROBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "third_party", "ffmpeg", "ffprobe.exe")
 
 # 测试用的样本文件（约1分钟的短视频，三个通道各一个）
 SAMPLE_FILES = {

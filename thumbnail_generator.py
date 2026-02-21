@@ -181,6 +181,8 @@ def prompt_for_videos(interactive: bool) -> List[Path]:
 def locate_tool(tool_name: str) -> str:
     script_dir = Path(__file__).resolve().parent
     candidates: Iterable[Path] = (
+        script_dir / "third_party" / "ffmpeg" / f"{tool_name}.exe",
+        script_dir / "third_party" / "ffmpeg" / tool_name,
         script_dir / f"{tool_name}.exe",
         script_dir / tool_name,
     )
