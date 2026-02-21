@@ -23,12 +23,12 @@ for %%I in (%*) do (
 
   echo Output File: "!outputFile!"
 
-  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
+  "%~dp0..\.vendor\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
     -vf "crop=1280:590:0:130" ^
     "!outputFile!"
 
   @REM copy /B "!outputFile!" +,, & copy /B "!inputFile!" +,, "!outputFile!"
-  "%~dp0..\third_party\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
+  "%~dp0..\.vendor\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
 )
 
 endlocal

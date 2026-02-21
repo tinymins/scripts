@@ -23,7 +23,7 @@ HASH_CHUNK_SIZE = 1 << 20  # 1 MiB
 CACHE_DB_FILENAME = "remove_duplicate_photos.index.db"
 CACHE_VERSION = 1
 SCRIPT_DIR = Path(__file__).resolve().parent
-CACHE_DIR = SCRIPT_DIR.parent / "cache"
+CACHE_DIR = SCRIPT_DIR.parent / ".cache"
 
 
 class SignatureCache:

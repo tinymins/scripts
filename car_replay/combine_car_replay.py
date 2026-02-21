@@ -44,7 +44,7 @@ DEFAULT_PROFILE = {
 
 # ffmpeg 路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG = os.path.join(SCRIPT_DIR, "..", "third_party", "ffmpeg", "ffmpeg.exe")
+FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
 
 
 def get_compress_profile(camera_id, cq_override=None):

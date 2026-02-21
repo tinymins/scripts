@@ -66,8 +66,8 @@ DEFAULT_PROFILE = {
 
 # ffmpeg/ffprobe 路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG = os.path.join(SCRIPT_DIR, "..", "third_party", "ffmpeg", "ffmpeg.exe")
-FFPROBE = os.path.join(SCRIPT_DIR, "..", "third_party", "ffmpeg", "ffprobe.exe")
+FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
+FFPROBE = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffprobe.exe")
 
 
 # ============================================================

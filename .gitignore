@@ -1,4 +1,4 @@
-/third_party/
-/cache/
+/.vendor/
+/.cache/
 __pycache__/
 *.log

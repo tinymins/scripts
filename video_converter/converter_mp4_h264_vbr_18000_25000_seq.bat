@@ -23,7 +23,7 @@ for %%I in (%*) do (
 
   echo Output File: "!outputFile!"
 
-  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
+  "%~dp0..\.vendor\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
     -map 0 ^
     -c:v h264_nvenc ^
     -b:v 18000k ^
@@ -35,7 +35,7 @@ for %%I in (%*) do (
     -r 60 ^
     -pass 1 ^
     -f null /dev/null
-  "%~dp0..\third_party\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
+  "%~dp0..\.vendor\ffmpeg\ffmpeg.exe" -i "!inputFile!" ^
     -map 0 ^
     -c:v h264_nvenc ^
     -b:v 18000k ^
@@ -50,7 +50,7 @@ for %%I in (%*) do (
     "!outputFile!"
 
   @REM copy /B "!outputFile!" +,, & copy /B "!inputFile!" +,, "!outputFile!"
-  "%~dp0..\third_party\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
+  "%~dp0..\.vendor\nircmd\nircmd.exe" clonefiletime "!inputFile!" "!outputFile!"
 )
 
 endlocal
