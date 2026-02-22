@@ -16,21 +16,21 @@ COMPRESS_PROFILES = {
         "bitrate": "8M",
         "maxrate": "12M",
         "bufsize": "16M",
-        "preset": "p5",
+        "preset": "p7",
     },
     "AB": {  # 1080p 后摄, 原始 ~8.4Mbps
         "cq": 32,
         "bitrate": "3M",
         "maxrate": "5M",
         "bufsize": "8M",
-        "preset": "p5",
+        "preset": "p7",
     },
     "AC": {  # 1080p 车内, 原始 ~8.4Mbps
         "cq": 32,
         "bitrate": "3M",
         "maxrate": "5M",
         "bufsize": "8M",
-        "preset": "p5",
+        "preset": "p7",
     },
 }
 
@@ -39,7 +39,7 @@ DEFAULT_PROFILE = {
     "bitrate": "5M",
     "maxrate": "8M",
     "bufsize": "10M",
-    "preset": "p5",
+    "preset": "p7",
 }
 
 # ffmpeg 路径
@@ -91,6 +91,12 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
         "-b:v", profile["bitrate"],
         "-maxrate", profile["maxrate"],
         "-bufsize", profile["bufsize"],
+        "-multipass", "fullres",
+        "-rc-lookahead", "32",
+        "-spatial-aq", "1",
+        "-temporal-aq", "1",
+        "-bf", "4",
+        "-b_ref_mode", "middle",
         "-c:a", "copy",
         "-movflags", "+faststart",
         temp_output,
