@@ -192,6 +192,32 @@ def compress_video(input_path, output_path, profile):
     return True, elapsed, input_size, output_size
 
 
+def is_valid_output(filepath):
+    """检查目标文件是否有效（存在且大小>0）"""
+    try:
+        return os.path.exists(filepath) and os.path.getsize(filepath) > 0
+    except OSError:
+        return False
+
+
+def cleanup_temp_files(folder):
+    """清理目标目录中上次中断遗留的 .tmp.mp4 临时文件"""
+    if not os.path.isdir(folder):
+        return 0
+    removed = 0
+    for root, dirs, files in os.walk(folder):
+        for filename in files:
+            if filename.endswith(".tmp.mp4"):
+                tmp_path = os.path.join(root, filename)
+                try:
+                    os.remove(tmp_path)
+                    removed += 1
+                    print(f"  Removed leftover temp file: {os.path.relpath(tmp_path, folder)}")
+                except OSError as e:
+                    print(f"  WARNING: Failed to remove temp file {tmp_path}: {e}")
+    return removed
+
+
 def scan_mp4_files(folder):
     """递归扫描文件夹中的所有文件，分为MP4和其他文件"""
     mp4_files = []
@@ -214,6 +240,24 @@ def scan_mp4_files(folder):
                 other_files.append(filepath)
 
     return mp4_files, other_files
+
+
+def classify_mp4_files(mp4_files, src_folder, target_folder):
+    """
+    将MP4文件分类为待处理和已完成。
+    已完成 = 目标文件存在且大小 > 0。
+    返回 (pending_list, skipped_list)，每项为 (src_path, dst_path, relative_path)
+    """
+    pending = []
+    skipped = []
+    for src_path in mp4_files:
+        relative_path = os.path.relpath(src_path, src_folder)
+        dst_path = os.path.join(target_folder, relative_path)
+        if is_valid_output(dst_path):
+            skipped.append((src_path, dst_path, relative_path))
+        else:
+            pending.append((src_path, dst_path, relative_path))
+    return pending, skipped
 
 
 def process_single_file(src_path, dst_path, src_folder, target_folder, cq_override, dry_run):
@@ -297,36 +341,53 @@ def main():
         print("No files to process.")
         return
 
+    # 清理上次中断遗留的临时文件
+    if os.path.isdir(target_folder):
+        print(f"\n--- Cleaning up temp files in target ---")
+        removed_temps = cleanup_temp_files(target_folder)
+        if removed_temps:
+            print(f"  Cleaned up {removed_temps} leftover temp file(s).")
+        else:
+            print("  No leftover temp files found.")
+
+    # 预分类：区分待处理 vs 已完成
+    pending_mp4, skipped_mp4 = classify_mp4_files(mp4_files, src_folder, target_folder)
+    skipped_size = sum(os.path.getsize(s) for s, _, _ in skipped_mp4)
+    pending_size = sum(os.path.getsize(s) for s, _, _ in pending_mp4)
+
+    print(f"\n--- Resume status ---")
+    print(f"  Already compressed (skip): {len(skipped_mp4)} files ({format_size(skipped_size)})")
+    print(f"  Pending compression:       {len(pending_mp4)} files ({format_size(pending_size)})")
+
+    if not pending_mp4 and not other_files:
+        print("\nAll files already processed. Nothing to do.")
+        return
+
+    if not pending_mp4:
+        print("\nAll MP4 files already compressed.")
+
     # 统计
-    total_files = len(mp4_files)
+    total_pending = len(pending_mp4)
     processed = 0
-    skipped = 0
+    skipped = len(skipped_mp4)
     failed = 0
     total_input_size = 0
     total_output_size = 0
     total_elapsed = 0
 
-    # 处理MP4文件
-    if mp4_files:
-        print(f"\n--- Processing {len(mp4_files)} MP4 files ---")
+    # 处理MP4文件（仅处理待压缩的）
+    if pending_mp4:
+        print(f"\n--- Compressing {total_pending} MP4 files ---")
 
         if args.parallel > 1 and not args.dry_run:
             # 并行处理
             futures = {}
             with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-                for src_path in mp4_files:
-                    relative_path = os.path.relpath(src_path, src_folder)
-                    dst_path = os.path.join(target_folder, relative_path)
-
+                for src_path, dst_path, relative_path in pending_mp4:
                     # 确保目标目录存在
                     dst_dir = os.path.dirname(dst_path)
                     if dst_dir:
                         os.makedirs(dst_dir, exist_ok=True)
-
-                    if os.path.exists(dst_path):
-                        skipped += 1
-                        print(f"  Already exists, skipping: {relative_path}")
-                        continue
 
                     future = executor.submit(
                         process_single_file,
@@ -348,6 +409,8 @@ def main():
                             total_input_size += in_size
                             total_output_size += out_size
                             total_elapsed += elapsed
+                        elif success is None:
+                            skipped += 1
                         else:
                             failed += 1
                     except Exception as e:
@@ -355,21 +418,13 @@ def main():
                         failed += 1
         else:
             # 顺序处理
-            for idx, src_path in enumerate(mp4_files):
-                relative_path = os.path.relpath(src_path, src_folder)
-                dst_path = os.path.join(target_folder, relative_path)
-
+            for idx, (src_path, dst_path, relative_path) in enumerate(pending_mp4):
                 # 确保目标目录存在
                 dst_dir = os.path.dirname(dst_path)
                 if dst_dir:
                     os.makedirs(dst_dir, exist_ok=True)
 
-                print(f"\n[{idx + 1}/{total_files}] ", end="")
-
-                if os.path.exists(dst_path) and not args.dry_run:
-                    skipped += 1
-                    print(f"Already exists, skipping: {relative_path}")
-                    continue
+                print(f"\n[{idx + 1}/{total_pending}] ", end="")
 
                 success, elapsed, in_size, out_size = process_single_file(
                     src_path, dst_path, src_folder, target_folder, args.cq, args.dry_run
