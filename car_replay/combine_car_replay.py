@@ -102,14 +102,16 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
         temp_output,
     ]
 
+    print(f"  CMD: {' '.join(cmd)}")
+
     start_time = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
     elapsed = time.time() - start_time
 
     if result.returncode != 0:
         if os.path.exists(temp_output):
             os.remove(temp_output)
-        print(f"  ERROR: Compression failed! {result.stderr[-300:]}")
+        print(f"  ERROR: Compression failed!")
         return False
 
     # 重命名为最终文件
@@ -122,7 +124,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
     saving = (1 - output_size / input_size) * 100 if input_size > 0 else 0
     print(
         f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
-        f"({ratio:.1f}x, -{saving:.0f}%) in {elapsed:.1f}s"
+        f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
     )
     return True
 
@@ -269,34 +271,75 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     print(f"Merging {len(video_group)} files into: {combined_file}")
     print(f"Files to merge: {[os.path.basename(v) for v in video_group]}")
 
-    # 多文件场景：先合并(stream copy)再压缩
-    if enable_compress:
-        merge_target = combined_file + ".merge_tmp.mp4"
-    else:
-        merge_target = combined_file
-
-    with open("concat_list.txt", "w") as f:
+    # 写入 concat 列表
+    concat_list_path = combined_file + ".concat_list.txt"
+    with open(concat_list_path, "w") as f:
         for video in video_group:
             f.write(f"file '{video}'\n")
 
-    command = [
-        FFMPEG, '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt',
-        '-c', 'copy', merge_target
-    ]
-
-    subprocess.run(command, check=True)
-    os.remove("concat_list.txt")
-    print("Merge complete.")
-
-    # 压缩步骤
     if enable_compress:
-        success = compress_video(merge_target, combined_file, camera_id, cq_override)
-        # 删除合并临时文件
-        if os.path.exists(merge_target):
-            os.remove(merge_target)
-        if not success:
-            print("  Compression failed! Merged file was removed.")
+        # 合并+压缩一步完成：concat 直接输入到 hevc_nvenc
+        profile = get_compress_profile(camera_id, cq_override)
+        input_size = sum(os.path.getsize(v) for v in video_group)
+        print(f"  Merge+Compress [{camera_id or '??'}] CQ{profile['cq']} ({len(video_group)} files)...")
+
+        temp_output = combined_file + ".compress_tmp.mp4"
+        cmd = [
+            FFMPEG,
+            "-y",
+            "-hwaccel", "cuda",
+            "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c:v", "hevc_nvenc",
+            "-preset", profile["preset"],
+            "-rc", "vbr",
+            "-cq", str(profile["cq"]),
+            "-b:v", profile["bitrate"],
+            "-maxrate", profile["maxrate"],
+            "-bufsize", profile["bufsize"],
+            "-multipass", "fullres",
+            "-rc-lookahead", "32",
+            "-spatial-aq", "1",
+            "-temporal-aq", "1",
+            "-bf", "4",
+            "-b_ref_mode", "middle",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            temp_output,
+        ]
+
+        print(f"  CMD: {' '.join(cmd)}")
+        start_time = time.time()
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
+        elapsed = time.time() - start_time
+
+        os.remove(concat_list_path)
+
+        if result.returncode != 0:
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            print(f"  ERROR: Merge+Compress failed!")
             return
+
+        if os.path.exists(combined_file):
+            os.remove(combined_file)
+        os.rename(temp_output, combined_file)
+
+        output_size = os.path.getsize(combined_file)
+        ratio = input_size / output_size if output_size > 0 else 0
+        saving = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+        print(
+            f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
+            f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
+        )
+    else:
+        # 不压缩：仅 stream copy 合并
+        command = [
+            FFMPEG, '-f', 'concat', '-safe', '0', '-i', concat_list_path,
+            '-c', 'copy', combined_file
+        ]
+        subprocess.run(command, check=True)
+        os.remove(concat_list_path)
+        print("Merge complete.")
 
     # 设置合并后文件的时间属性为最后一个视频文件的时间属性
     os.utime(combined_file, (last_access_time, last_mod_time))
