@@ -4,5 +4,8 @@
   ],
   "[bat]": {
     "files.encoding": "gbk"
+  },
+  "[powershell]": {
+    "files.encoding": "gbk"
   }
 }
