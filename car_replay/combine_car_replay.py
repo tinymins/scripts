@@ -112,7 +112,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
         if os.path.exists(temp_output):
             os.remove(temp_output)
         print(f"  ERROR: Compression failed!")
-        return False
+        return False, 0, 0, elapsed
 
     # 重命名为最终文件
     if os.path.exists(output_path):
@@ -126,7 +126,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
         f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
         f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
     )
-    return True
+    return True, input_size, output_size, elapsed
 
 
 class VideoInfo:
@@ -253,20 +253,21 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩：直接从源压缩到目标
         print(f"Compressing single file: {video_group[0]} to {combined_file}")
-        success = compress_video(video_group[0], combined_file, camera_id, cq_override)
+        success, in_sz, out_sz, elapsed = compress_video(video_group[0], combined_file, camera_id, cq_override)
         if success:
             os.utime(combined_file, (last_access_time, last_mod_time))
+            return in_sz, out_sz, elapsed
         else:
             # 压缩失败时回退到直接复制
             print("  Compression failed, falling back to copy...")
             shutil.copy2(video_group[0], combined_file)
-        return
+            return 0, 0, 0
 
     if len(video_group) == 1 and not enable_compress:
         # 单文件 + 不压缩：直接复制
         print(f"Copying single file: {video_group[0]} to {combined_file}")
         shutil.copy2(video_group[0], combined_file)
-        return
+        return 0, 0, 0
 
     print(f"Merging {len(video_group)} files into: {combined_file}")
     print(f"Files to merge: {[os.path.basename(v) for v in video_group]}")
@@ -318,7 +319,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             if os.path.exists(temp_output):
                 os.remove(temp_output)
             print(f"  ERROR: Merge+Compress failed!")
-            return
+            return 0, 0, 0
 
         if os.path.exists(combined_file):
             os.remove(combined_file)
@@ -331,6 +332,10 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
             f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
         )
+
+        # 设置时间属性
+        os.utime(combined_file, (last_access_time, last_mod_time))
+        return input_size, output_size, elapsed
     else:
         # 不压缩：仅 stream copy 合并
         command = [
@@ -343,7 +348,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
 
     # 设置合并后文件的时间属性为最后一个视频文件的时间属性
     os.utime(combined_file, (last_access_time, last_mod_time))
-    print("File timestamps set to match the last video segment.")
+    return 0, 0, 0
 
 def process_videos_in_folder(src_folder, target_folder_base, enable_compress=False, cq_override=None):
     mp4_files = []
@@ -380,6 +385,11 @@ def process_videos_in_folder(src_folder, target_folder_base, enable_compress=Fal
         print(f"Total video groups to process: {total_groups}")
 
         processed_groups = 0
+        skipped_groups = 0
+        failed_groups = 0
+        total_input_size = 0
+        total_output_size = 0
+        total_elapsed = 0
 
         # 处理每个视频组
         for group in grouped_videos:
@@ -405,11 +415,42 @@ def process_videos_in_folder(src_folder, target_folder_base, enable_compress=Fal
             print(f"Group contains {len(group)} files")
 
             if not check_file_exists(combined_file_path):
-                merge_videos(group, combined_file_path, enable_compress, cq_override)
+                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override)
+                total_input_size += in_sz
+                total_output_size += out_sz
+                total_elapsed += elapsed
+                if enable_compress and in_sz > 0 and out_sz == 0:
+                    failed_groups += 1
             else:
                 print(f"Combined file already exists: {combined_file_path}, skipping...")
+                skipped_groups += 1
 
-        print(f"\nMP4 processing completed. {processed_groups} groups processed.")
+        # 打印汇总
+        print(f"\n{'='*70}")
+        print("处理完成汇总")
+        print(f"{'='*70}")
+        print(f"  视频组总数: {total_groups}")
+        print(f"  已处理: {processed_groups - skipped_groups - failed_groups}")
+        print(f"  已跳过: {skipped_groups}")
+        if failed_groups > 0:
+            print(f"  失败: {failed_groups}")
+        if enable_compress and total_input_size > 0:
+            overall_ratio = total_input_size / total_output_size if total_output_size > 0 else 0
+            overall_saving = (1 - total_output_size / total_input_size) * 100
+            print(f"  原始总大小: {format_size(total_input_size)}")
+            print(f"  压缩后总大小: {format_size(total_output_size)}")
+            print(f"  总体压缩比: {overall_ratio:.1f}x")
+            print(f"  总体节省: {overall_saving:.0f}%")
+            hours = int(total_elapsed // 3600)
+            minutes = int((total_elapsed % 3600) // 60)
+            seconds = int(total_elapsed % 60)
+            if hours > 0:
+                print(f"  压缩总耗时: {hours}h{minutes:02d}m{seconds:02d}s")
+            elif minutes > 0:
+                print(f"  压缩总耗时: {minutes}m{seconds:02d}s")
+            else:
+                print(f"  压缩总耗时: {seconds}s")
+        print(f"{'='*70}")
 
     # 处理其他类型文件
     if other_files:
