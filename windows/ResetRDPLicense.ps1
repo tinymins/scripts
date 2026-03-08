@@ -1,5 +1,13 @@
+param(
+    [switch]$Silent
+)
+
 # 要求管理员权限
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    if ($Silent) {
+        Write-Error "需要管理员权限！静默模式下无法自动提升，请以管理员身份运行。"
+        exit 1
+    }
     Write-Host "需要管理员权限！正在重新启动..." -ForegroundColor Red
     Start-Process PowerShell -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     exit
@@ -112,9 +120,11 @@ if (-not $result) {
     Write-Host "    6. 给当前用户完全控制权限" -ForegroundColor White
     Write-Host "    7. 删除GracePeriod下的所有内容" -ForegroundColor White
     Write-Host ""
-    Write-Host "    按任意键打开注册表编辑器..." -ForegroundColor Yellow
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    Start-Process regedit
+    if (-not $Silent) {
+        Write-Host "    按任意键打开注册表编辑器..." -ForegroundColor Yellow
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        Start-Process regedit
+    }
 }
 
 # 设置授权模式
@@ -134,5 +144,7 @@ Write-Host "===========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "建议重启计算机以确保生效" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "按任意键退出..."
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+if (-not $Silent) {
+    Write-Host "按任意键退出..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
