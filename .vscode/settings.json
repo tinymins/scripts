@@ -1,5 +1,8 @@
 {
   "flake8.args": [
     "--ignore=E501,E722"
-  ]
+  ],
+  "[bat]": {
+    "files.encoding": "gbk"
+  }
 }
