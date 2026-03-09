@@ -30,7 +30,11 @@
 #
 # ==========================================================
 
-#Requires -RunAsAdministrator
+# Auto-elevate to Administrator if not already elevated
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    exit
+}
 
 $maxAttempts = 20
 $attempt = 0
