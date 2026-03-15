@@ -311,10 +311,17 @@ main() {
         exit 1
     fi
 
-    # 3. 可选：关键词过滤
+    # 3. 主循环：选择 workspace → 执行操作 → 回到选择
+    while true; do
+
     echo -e "${BOLD}找到 ${total} 个 workspace 记录${RESET}"
-    echo -ne "${YELLOW}输入关键词过滤（留空显示全部）:${RESET} "
+    echo -ne "${YELLOW}输入关键词过滤（留空显示全部，输入 q 退出）:${RESET} "
     read -r filter_keyword
+
+    if [[ "$filter_keyword" == "q" || "$filter_keyword" == "Q" ]]; then
+        echo -e "${DIM}再见。${RESET}"
+        exit 0
+    fi
 
     FILTERED_HASHES=()
     FILTERED_FOLDERS=()
@@ -335,7 +342,8 @@ main() {
     local filtered_total=${#FILTERED_HASHES[@]}
     if [[ $filtered_total -eq 0 ]]; then
         echo -e "${RED}✗ 没有匹配的 workspace${RESET}"
-        exit 1
+        echo ""
+        continue
     fi
 
     # 按 mtime 降序排序（最近使用的在前）
@@ -424,6 +432,12 @@ for line in sys.stdin:
         0) do_migrate "$sel_hash" "$sel_folder" "$sel_ws_dir" ;;
         1) do_delete "$sel_hash" "$sel_folder" "$sel_ws_dir" ;;
     esac
+
+    echo ""
+    echo -e "${DIM}────────────────────────────────────────${RESET}"
+    echo ""
+
+    done  # end while true
 }
 
 # ── 迁移操作 ──
@@ -445,14 +459,14 @@ do_migrate() {
     fi
     editable_part=$(url_decode "$editable_part")
 
-    echo -ne "${CYAN}当前路径: ${RESET}${editable_part}"
-    echo ""
-    echo -ne "${CYAN}新路径:   ${RESET}"
-    read -r -e -i "$editable_part" new_path
+    echo -e "${CYAN}当前路径: ${RESET}${editable_part}"
+    # 使用 \001/\002 包裹 ANSI 转义，让 readline 正确计算光标位置
+    local prompt=$'\001\033[0;36m\002新路径:   \001\033[0m\002'
+    read -r -e -i "$editable_part" -p "$prompt" new_path
 
     if [[ -z "$new_path" || "$new_path" == "$editable_part" ]]; then
-        echo -e "${YELLOW}路径未变更，退出。${RESET}"
-        exit 0
+        echo -e "${YELLOW}路径未变更。${RESET}"
+        return
     fi
 
     # 重新编码回 URI（中文等非 ASCII 字符需要 percent-encode）
@@ -550,10 +564,10 @@ do_delete() {
     echo -e "  ${BOLD}总计: ${combined_size}${RESET}"
     echo ""
     echo -e "${RED}${BOLD}⚠ 此操作不可恢复！Chat 历史、索引缓存等数据将被永久删除。${RESET}"
-    echo -ne "${YELLOW}确认删除? 输入 'delete' 确认:${RESET} "
+    echo -ne "${YELLOW}确认删除? [y/N]:${RESET} "
     read -r confirm
 
-    if [[ "$confirm" != "delete" ]]; then
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo -e "${DIM}已取消。${RESET}"
         return
     fi
