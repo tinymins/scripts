@@ -120,18 +120,18 @@ _interactive_select() {
 
     # 非交互终端回退
     if [[ ! -t 0 ]]; then
-        echo -e "${YELLOW}非交互终端，请输入编号:${RESET}" >&2
-        read -r selected
+        echo -e "${YELLOW}非交互终端，请输入编号:${RESET}" > /dev/tty
+        read -r selected < /dev/tty
         echo "$selected"
         return
     fi
 
-    tput civis 2>/dev/null || true
-    trap 'tput cnorm 2>/dev/null; trap - RETURN' RETURN
+    tput civis 2>/dev/null > /dev/tty || true
+    trap 'tput cnorm 2>/dev/null > /dev/tty; trap - RETURN' RETURN
 
     _render() {
         for ((i = 0; i < total; i++)); do
-            tput el 2>/dev/null
+            tput el 2>/dev/null > /dev/tty
             $renderer "$i" "$selected"
         done
     }
@@ -139,31 +139,31 @@ _interactive_select() {
     _render
 
     while true; do
-        IFS= read -rsn1 key
+        IFS= read -rsn1 key < /dev/tty
         case "$key" in
             [0-9])
                 local num="$key"
                 if ((num >= 1 && num <= total)); then
                     selected=$((num - 1))
-                    for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null; done
+                    for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
                     _render
-                    echo ""
+                    echo "" > /dev/tty
                     echo "$selected"
                     return
                 fi
                 ;;
             $'\x1b')
-                read -rsn1 -t 0.1 k2 || true
-                read -rsn1 -t 0.1 k3 || true
+                read -rsn1 -t 0.1 k2 < /dev/tty || true
+                read -rsn1 -t 0.1 k3 < /dev/tty || true
                 case "$k2$k3" in
                     "[A") ((selected > 0)) && ((selected--)) ;;
                     "[B") ((selected < total - 1)) && ((selected++)) ;;
                 esac
-                for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null; done
+                for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
                 _render
                 ;;
             "")
-                echo ""
+                echo "" > /dev/tty
                 echo "$selected"
                 return
                 ;;
@@ -180,11 +180,11 @@ _render_workspace_item() {
     local size="${FILTERED_SIZES[$i]}"
 
     if [[ $i -eq $selected ]]; then
-        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}"
-        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}"
+        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}" > /dev/tty
+        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     else
-        echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}"
-        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}"
+        echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}" > /dev/tty
+        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     fi
 }
 
@@ -195,9 +195,9 @@ ACTION_DESCS=()
 _render_action_item() {
     local i=$1 selected=$2
     if [[ $i -eq $selected ]]; then
-        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}"
+        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     else
-        echo -e "    ${DIM}[$((i + 1))]${RESET} ${ACTION_LABELS[$i]}  ${DIM}${ACTION_DESCS[$i]}${RESET}"
+        echo -e "    ${DIM}[$((i + 1))]${RESET} ${ACTION_LABELS[$i]}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     fi
 }
 
