@@ -16,6 +16,24 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
+# ── URI percent-encoding 解码（纯 bash，支持 UTF-8/中文） ──
+uri_decode() {
+    local converted
+    # 先转义已有的反斜杠，再将 %XX 转为 \xXX，最后由 printf 解释
+    converted=$(sed 's/\\/\\\\/g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g' <<< "$1")
+    printf '%b' "$converted"
+}
+
+# ── URI percent-encoding 编码（将非 ASCII 和特殊字符编码，保留 /） ──
+uri_encode_path() {
+    if command -v python3 &>/dev/null; then
+        python3 -c "import sys,urllib.parse;sys.stdout.write(urllib.parse.quote(sys.argv[1],safe='/'))" "$1"
+    else
+        # 基础回退：仅编码空格
+        printf '%s' "$1" | sed 's/ /%20/g'
+    fi
+}
+
 # ── 检测 VS Code workspace storage 路径 ──
 detect_storage_dir() {
     local candidates=()
@@ -96,57 +114,108 @@ scan_workspaces() {
 # ── 对 folder URI 做人类可读化 ──
 humanize_uri() {
     local uri="$1"
-    # 解码常见 percent-encoding
-    uri=$(echo "$uri" | sed 's/%2B/+/g;s/%2b/+/g;s/%3A/:/g;s/%3a/:/g;s/%20/ /g')
     # 去掉 scheme 前缀，保留关键路径
     if [[ "$uri" == vscode-remote://* ]]; then
-        echo "${uri#vscode-remote://}"
+        uri="${uri#vscode-remote://}"
     elif [[ "$uri" == file://* ]]; then
-        echo "${uri#file://}"
-    else
-        echo "$uri"
+        uri="${uri#file://}"
     fi
+    # 完整解码 percent-encoding（包括中文等 UTF-8 字符）
+    uri_decode "$uri"
 }
 
-# ── 通用交互选择器（支持数字 / 上下键） ──
-# 参数: item_count render_callback
-# render_callback(index, is_selected) 由调用方提供
+# ── 通用交互选择器（分页显示，支持数字 / 上下键 / 翻页） ──
+# 参数: item_count render_callback lines_per_item
 # 返回选中的 index（通过 stdout）
 _interactive_select() {
     local total=$1
     local renderer=$2  # 渲染函数名
     local lines_per_item=${3:-2}  # 每项占几行，默认 2
     local selected=0
+    local page_size=15
+    ((page_size > total)) && page_size=$total
+    local offset=0
 
     # 非交互终端回退
     if [[ ! -t 0 ]]; then
         echo -e "${YELLOW}非交互终端，请输入编号:${RESET}" > /dev/tty
         read -r selected < /dev/tty
-        echo "$selected"
+        echo "$((selected - 1))"
         return
     fi
 
     tput civis 2>/dev/null > /dev/tty || true
     trap 'tput cnorm 2>/dev/null > /dev/tty; trap - RETURN' RETURN
 
-    _render() {
-        for ((i = 0; i < total; i++)); do
+    local visible_count=$page_size
+    local indicator_lines=$(( total > visible_count ? 2 : 0 ))
+    local window_height=$((visible_count * lines_per_item + indicator_lines))
+
+    _adjust_offset() {
+        if ((selected < offset)); then
+            offset=$selected
+        elif ((selected >= offset + visible_count)); then
+            offset=$((selected - visible_count + 1))
+        fi
+        local max_offset=$((total - visible_count))
+        ((max_offset < 0)) && max_offset=0
+        ((offset > max_offset)) && offset=$max_offset
+        ((offset < 0)) && offset=0
+    }
+
+    _render_window() {
+        local end=$((offset + visible_count))
+        ((end > total)) && end=$total
+
+        if ((indicator_lines > 0)); then
             tput el 2>/dev/null > /dev/tty
+            if ((offset > 0)); then
+                echo -e "  ${DIM}↑ 还有 ${offset} 项${RESET}" > /dev/tty
+            else
+                echo "" > /dev/tty
+            fi
+        fi
+
+        for ((i = offset; i < end; i++)); do
             $renderer "$i" "$selected"
+        done
+
+        if ((indicator_lines > 0)); then
+            tput el 2>/dev/null > /dev/tty
+            local remaining=$((total - end))
+            if ((remaining > 0)); then
+                echo -e "  ${DIM}↓ 还有 ${remaining} 项${RESET}" > /dev/tty
+            else
+                echo "" > /dev/tty
+            fi
+        fi
+    }
+
+    _move_cursor_up() {
+        for ((i = 0; i < window_height; i++)); do
+            tput cuu1 2>/dev/null > /dev/tty
         done
     }
 
-    _render
+    _render_window
 
     while true; do
         IFS= read -rsn1 key < /dev/tty
         case "$key" in
             [0-9])
                 local num="$key"
+                while IFS= read -rsn1 -t 0.5 next_char < /dev/tty 2>/dev/null; do
+                    if [[ "$next_char" =~ [0-9] ]]; then
+                        num+="$next_char"
+                    else
+                        break
+                    fi
+                done
                 if ((num >= 1 && num <= total)); then
                     selected=$((num - 1))
-                    for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
-                    _render
+                    _adjust_offset
+                    _move_cursor_up
+                    _render_window
                     echo "" > /dev/tty
                     echo "$selected"
                     return
@@ -158,9 +227,20 @@ _interactive_select() {
                 case "$k2$k3" in
                     "[A") ((selected > 0)) && ((selected--)) ;;
                     "[B") ((selected < total - 1)) && ((selected++)) ;;
+                    "[5"|"[6")
+                        read -rsn1 -t 0.1 _k4 < /dev/tty || true
+                        if [[ "$k3" == "5" ]]; then
+                            ((selected -= visible_count))
+                            ((selected < 0)) && selected=0
+                        else
+                            ((selected += visible_count))
+                            ((selected >= total)) && selected=$((total - 1))
+                        fi
+                        ;;
                 esac
-                for ((i = 0; i < total * lines_per_item; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
-                _render
+                _adjust_offset
+                _move_cursor_up
+                _render_window
                 ;;
             "")
                 echo "" > /dev/tty
@@ -180,10 +260,14 @@ _render_workspace_item() {
     local size="${FILTERED_SIZES[$i]}"
 
     if [[ $i -eq $selected ]]; then
+        tput el 2>/dev/null > /dev/tty
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}" > /dev/tty
+        tput el 2>/dev/null > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     else
+        tput el 2>/dev/null > /dev/tty
         echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}" > /dev/tty
+        tput el 2>/dev/null > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     fi
 }
@@ -194,6 +278,7 @@ ACTION_DESCS=()
 
 _render_action_item() {
     local i=$1 selected=$2
+    tput el 2>/dev/null > /dev/tty
     if [[ $i -eq $selected ]]; then
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     else
@@ -258,7 +343,9 @@ main() {
     FILTERED_MTIMES=()
 
     for ((i = 0; i < total; i++)); do
-        if [[ -z "$filter_keyword" ]] || echo "${ALL_FOLDERS[$i]}" | grep -qi "$filter_keyword"; then
+        local decoded_folder_i
+        decoded_folder_i=$(uri_decode "${ALL_FOLDERS[$i]}")
+        if [[ -z "$filter_keyword" ]] || echo "${ALL_FOLDERS[$i]} ${decoded_folder_i}" | grep -qi "$filter_keyword"; then
             FILTERED_HASHES+=("${ALL_HASHES[$i]}")
             FILTERED_FOLDERS+=("${ALL_FOLDERS[$i]}")
             FILTERED_SIZES+=("${ALL_SIZES[$i]}")
@@ -349,7 +436,7 @@ do_migrate() {
     else
         editable_part="$sel_folder"
     fi
-    editable_part=$(echo "$editable_part" | sed 's/%2B/+/g;s/%2b/+/g;s/%3A/:/g;s/%3a/:/g;s/%20/ /g')
+    editable_part=$(uri_decode "$editable_part")
 
     echo -ne "${CYAN}当前路径: ${RESET}${editable_part}"
     echo ""
@@ -363,8 +450,8 @@ do_migrate() {
 
     # 重新编码回 URI
     local new_uri
-    # 还原 percent-encoding（保守：仅恢复空格和冒号）
-    new_path_encoded=$(echo "$new_path" | sed 's/ /%20/g')
+    local new_path_encoded
+    new_path_encoded=$(uri_encode_path "$new_path")
     if [[ "$sel_folder" == vscode-remote://* ]]; then
         local authority
         authority=$(echo "$sel_folder" | sed 's|vscode-remote://\([^/]*\)/.*|\1|')
