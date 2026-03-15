@@ -159,13 +159,13 @@ _interactive_select() {
             else
                 # 空行填充
                 for ((li = 0; li < lines_per_item; li++)); do
-                    tput el 2>/dev/null > /dev/tty
+                    printf '\r\033[K' > /dev/tty
                     echo "" > /dev/tty
                 done
             fi
         done
         # 状态栏
-        tput el 2>/dev/null > /dev/tty
+        printf '\r\033[K' > /dev/tty
         if ((total > window)); then
             echo -e "  ${DIM}── $((selected + 1))/${total} ──${RESET}" > /dev/tty
         fi
@@ -182,9 +182,14 @@ _interactive_select() {
         local redraw=0
         case "$key" in
             $'\x1b')
-                read -rsn1 -t 0.1 k2 < /dev/tty || true
-                read -rsn1 -t 0.1 k3 < /dev/tty || true
-                case "$k2$k3" in
+                read -rsn1 -t 0.05 k2 < /dev/tty || true
+                read -rsn1 -t 0.05 k3 < /dev/tty || true
+                # Page Up/Down 有第 4 字节 ~
+                local k4=""
+                if [[ "$k3" == "5" || "$k3" == "6" ]]; then
+                    read -rsn1 -t 0.05 k4 < /dev/tty || true
+                fi
+                case "$k2$k3$k4" in
                     "[A") # UP
                         if ((selected > 0)); then
                             ((selected--))
@@ -222,6 +227,8 @@ _interactive_select() {
                 ;;
         esac
         if ((redraw)); then
+            # 清空多余输入（快速连按产生的残留按键）
+            while read -rsn1 -t 0.01 _ < /dev/tty 2>/dev/null; do :; done
             for ((i = 0; i < total_render_lines; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
             _render_window
         fi
@@ -237,10 +244,14 @@ _render_workspace_item() {
     local size="${FILTERED_SIZES[$i]}"
 
     if [[ $i -eq $selected ]]; then
+        printf '\r\033[K' > /dev/tty
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}" > /dev/tty
+        printf '\r\033[K' > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     else
+        printf '\r\033[K' > /dev/tty
         echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}" > /dev/tty
+        printf '\r\033[K' > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     fi
 }
@@ -252,8 +263,10 @@ ACTION_DESCS=()
 _render_action_item() {
     local i=$1 selected=$2
     if [[ $i -eq $selected ]]; then
+        printf '\r\033[K' > /dev/tty
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     else
+        printf '\r\033[K' > /dev/tty
         echo -e "    ${DIM}[$((i + 1))]${RESET} ${ACTION_LABELS[$i]}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     fi
 }
