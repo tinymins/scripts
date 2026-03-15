@@ -238,21 +238,16 @@ _interactive_select() {
 # ── workspace 列表渲染器 ──
 _render_workspace_item() {
     local i=$1 selected=$2
-    local display_folder
-    display_folder=$(humanize_uri "${FILTERED_FOLDERS[$i]}")
+    local display_folder="${FILTERED_DISPLAYS[$i]}"
     local mtime_human="${FILTERED_MTIMES[$i]%%|*}"
     local size="${FILTERED_SIZES[$i]}"
 
     if [[ $i -eq $selected ]]; then
-        printf '\r\033[K' > /dev/tty
-        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}" > /dev/tty
-        printf '\r\033[K' > /dev/tty
-        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
+        printf '\r\033[K  \033[0;36m\033[1m▸ [%d]\033[0m \033[1m%s\033[0m\n\r\033[K        \033[2m%s  ·  %s\033[0m\n' \
+            "$((i + 1))" "$display_folder" "$size" "$mtime_human" > /dev/tty
     else
-        printf '\r\033[K' > /dev/tty
-        echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}" > /dev/tty
-        printf '\r\033[K' > /dev/tty
-        echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
+        printf '\r\033[K    \033[2m[%d]\033[0m %s\n\r\033[K        \033[2m%s  ·  %s\033[0m\n' \
+            "$((i + 1))" "$display_folder" "$size" "$mtime_human" > /dev/tty
     fi
 }
 
@@ -263,11 +258,11 @@ ACTION_DESCS=()
 _render_action_item() {
     local i=$1 selected=$2
     if [[ $i -eq $selected ]]; then
-        printf '\r\033[K' > /dev/tty
-        echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
+        printf '\r\033[K  \033[0;36m\033[1m▸ [%d]\033[0m \033[1m%s\033[0m  \033[2m%s\033[0m\n' \
+            "$((i + 1))" "${ACTION_LABELS[$i]}" "${ACTION_DESCS[$i]}" > /dev/tty
     else
-        printf '\r\033[K' > /dev/tty
-        echo -e "    ${DIM}[$((i + 1))]${RESET} ${ACTION_LABELS[$i]}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
+        printf '\r\033[K    \033[2m[%d]\033[0m %s  \033[2m%s\033[0m\n' \
+            "$((i + 1))" "${ACTION_LABELS[$i]}" "${ACTION_DESCS[$i]}" > /dev/tty
     fi
 }
 
@@ -362,6 +357,36 @@ main() {
     FILTERED_SIZES=("${TEMP_SIZES[@]}")
     FILTERED_STORAGE_DIRS=("${TEMP_STORAGE_DIRS[@]}")
     FILTERED_MTIMES=("${TEMP_MTIMES[@]}")
+
+    # 预计算显示名称（单次 python3 调用批量解码，避免渲染时反复 fork）
+    echo -e "${DIM}正在解析路径名称...${RESET}"
+    FILTERED_DISPLAYS=()
+    local _raw_folders=""
+    for ((i = 0; i < ${#FILTERED_FOLDERS[@]}; i++)); do
+        _raw_folders+="${FILTERED_FOLDERS[$i]}"$'\n'
+    done
+    local _decoded
+    _decoded=$(printf '%s' "$_raw_folders" | python3 -c "
+import sys, urllib.parse
+for line in sys.stdin:
+    uri = urllib.parse.unquote(line.rstrip('\n'))
+    # strip scheme prefix
+    if uri.startswith('vscode-remote://'):
+        uri = uri[len('vscode-remote://'):]
+    elif uri.startswith('file://'):
+        uri = uri[len('file://'):]
+    print(uri)
+" 2>/dev/null) || _decoded=""
+    if [[ -n "$_decoded" ]]; then
+        while IFS= read -r line; do
+            FILTERED_DISPLAYS+=("$line")
+        done <<< "$_decoded"
+    else
+        # fallback: 原样显示
+        for ((i = 0; i < ${#FILTERED_FOLDERS[@]}; i++)); do
+            FILTERED_DISPLAYS+=("$(humanize_uri "${FILTERED_FOLDERS[$i]}")")
+        done
+    fi
 
     echo ""
     echo -e "${BOLD}选择 workspace（↑↓ 移动，Enter 确认，或输入数字）:${RESET}"
