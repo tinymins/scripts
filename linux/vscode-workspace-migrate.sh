@@ -16,24 +16,6 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-# ── URI percent-encoding 解码（纯 bash，支持 UTF-8/中文） ──
-uri_decode() {
-    local converted
-    # 先转义已有的反斜杠，再将 %XX 转为 \xXX，最后由 printf 解释
-    converted=$(sed 's/\\/\\\\/g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g' <<< "$1")
-    printf '%b' "$converted"
-}
-
-# ── URI percent-encoding 编码（将非 ASCII 和特殊字符编码，保留 /） ──
-uri_encode_path() {
-    if command -v python3 &>/dev/null; then
-        python3 -c "import sys,urllib.parse;sys.stdout.write(urllib.parse.quote(sys.argv[1],safe='/'))" "$1"
-    else
-        # 基础回退：仅编码空格
-        printf '%s' "$1" | sed 's/ /%20/g'
-    fi
-}
-
 # ── 检测 VS Code workspace storage 路径 ──
 detect_storage_dir() {
     local candidates=()
@@ -111,136 +93,127 @@ scan_workspaces() {
     done
 }
 
+# ── URL percent-decode（完整 UTF-8 支持）──
+url_decode() {
+    python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))" "$1" 2>/dev/null \
+        || echo "$1"  # fallback: 原样返回
+}
+
+# ── URL percent-encode（仅编码非 ASCII 和特殊字符）──
+url_encode_path() {
+    python3 - "$1" << 'PYEOF' 2>/dev/null || echo "$1"
+import sys, urllib.parse
+path = sys.argv[1]
+print(urllib.parse.quote(path, safe="/:@!$&'()*+,;=-._~"))
+PYEOF
+}
+
 # ── 对 folder URI 做人类可读化 ──
 humanize_uri() {
     local uri="$1"
+    # 完整解码 percent-encoding
+    uri=$(url_decode "$uri")
     # 去掉 scheme 前缀，保留关键路径
     if [[ "$uri" == vscode-remote://* ]]; then
-        uri="${uri#vscode-remote://}"
+        echo "${uri#vscode-remote://}"
     elif [[ "$uri" == file://* ]]; then
-        uri="${uri#file://}"
+        echo "${uri#file://}"
+    else
+        echo "$uri"
     fi
-    # 完整解码 percent-encoding（包括中文等 UTF-8 字符）
-    uri_decode "$uri"
 }
 
-# ── 通用交互选择器（分页显示，支持数字 / 上下键 / 翻页） ──
-# 参数: item_count render_callback lines_per_item
+# ── 通用交互选择器（支持数字 / 上下键） ──
+# 参数: item_count render_callback
+# render_callback(index, is_selected) 由调用方提供
 # 返回选中的 index（通过 stdout）
 _interactive_select() {
     local total=$1
     local renderer=$2  # 渲染函数名
-    local lines_per_item=${3:-2}  # 每项占几行，默认 2
+    local lines_per_item=${3:-2}  # 每项占几行
+    local page_size=${4:-10}  # 每页显示条数
     local selected=0
-    local page_size=15
-    ((page_size > total)) && page_size=$total
-    local offset=0
+    local offset=0  # 当前窗口起始 index
 
     # 非交互终端回退
     if [[ ! -t 0 ]]; then
         echo -e "${YELLOW}非交互终端，请输入编号:${RESET}" > /dev/tty
         read -r selected < /dev/tty
-        echo "$((selected - 1))"
+        echo "$selected"
         return
     fi
+
+    # 实际窗口大小 = min(page_size, total)
+    local window=$page_size
+    ((window > total)) && window=$total
 
     tput civis 2>/dev/null > /dev/tty || true
     trap 'tput cnorm 2>/dev/null > /dev/tty; trap - RETURN' RETURN
 
-    local visible_count=$page_size
-    local indicator_lines=$(( total > visible_count ? 2 : 0 ))
-    local window_height=$((visible_count * lines_per_item + indicator_lines))
-
-    _adjust_offset() {
-        if ((selected < offset)); then
-            offset=$selected
-        elif ((selected >= offset + visible_count)); then
-            offset=$((selected - visible_count + 1))
-        fi
-        local max_offset=$((total - visible_count))
-        ((max_offset < 0)) && max_offset=0
-        ((offset > max_offset)) && offset=$max_offset
-        ((offset < 0)) && offset=0
-    }
-
+    # 渲染固定行数的窗口
     _render_window() {
-        local end=$((offset + visible_count))
-        ((end > total)) && end=$total
-
-        if ((indicator_lines > 0)); then
-            tput el 2>/dev/null > /dev/tty
-            if ((offset > 0)); then
-                echo -e "  ${DIM}↑ 还有 ${offset} 项${RESET}" > /dev/tty
+        for ((wi = 0; wi < window; wi++)); do
+            local idx=$((offset + wi))
+            if ((idx < total)); then
+                $renderer "$idx" "$selected"
             else
-                echo "" > /dev/tty
+                # 空行填充
+                for ((li = 0; li < lines_per_item; li++)); do
+                    tput el 2>/dev/null > /dev/tty
+                    echo "" > /dev/tty
+                done
             fi
-        fi
-
-        for ((i = offset; i < end; i++)); do
-            $renderer "$i" "$selected"
         done
-
-        if ((indicator_lines > 0)); then
-            tput el 2>/dev/null > /dev/tty
-            local remaining=$((total - end))
-            if ((remaining > 0)); then
-                echo -e "  ${DIM}↓ 还有 ${remaining} 项${RESET}" > /dev/tty
-            else
-                echo "" > /dev/tty
-            fi
+        # 状态栏
+        tput el 2>/dev/null > /dev/tty
+        if ((total > window)); then
+            echo -e "  ${DIM}── $((selected + 1))/${total} ──${RESET}" > /dev/tty
         fi
-    }
-
-    _move_cursor_up() {
-        for ((i = 0; i < window_height; i++)); do
-            tput cuu1 2>/dev/null > /dev/tty
-        done
     }
 
     _render_window
 
+    local status_lines=0
+    ((total > window)) && status_lines=1
+    local total_render_lines=$(( window * lines_per_item + status_lines ))
+
     while true; do
         IFS= read -rsn1 key < /dev/tty
+        local redraw=0
         case "$key" in
-            [0-9])
-                local num="$key"
-                while IFS= read -rsn1 -t 0.5 next_char < /dev/tty 2>/dev/null; do
-                    if [[ "$next_char" =~ [0-9] ]]; then
-                        num+="$next_char"
-                    else
-                        break
-                    fi
-                done
-                if ((num >= 1 && num <= total)); then
-                    selected=$((num - 1))
-                    _adjust_offset
-                    _move_cursor_up
-                    _render_window
-                    echo "" > /dev/tty
-                    echo "$selected"
-                    return
-                fi
-                ;;
             $'\x1b')
                 read -rsn1 -t 0.1 k2 < /dev/tty || true
                 read -rsn1 -t 0.1 k3 < /dev/tty || true
                 case "$k2$k3" in
-                    "[A") ((selected > 0)) && ((selected--)) ;;
-                    "[B") ((selected < total - 1)) && ((selected++)) ;;
-                    "[5"|"[6")
-                        read -rsn1 -t 0.1 _k4 < /dev/tty || true
-                        if [[ "$k3" == "5" ]]; then
-                            ((selected -= visible_count))
-                            ((selected < 0)) && selected=0
-                        else
-                            ((selected += visible_count))
-                            ((selected >= total)) && selected=$((total - 1))
+                    "[A") # UP
+                        if ((selected > 0)); then
+                            ((selected--))
+                            # 滚动窗口
+                            ((selected < offset)) && offset=$selected
+                            redraw=1
                         fi
                         ;;
+                    "[B") # DOWN
+                        if ((selected < total - 1)); then
+                            ((selected++))
+                            # 滚动窗口
+                            ((selected >= offset + window)) && ((offset = selected - window + 1))
+                            redraw=1
+                        fi
+                        ;;
+                    "[5~") # Page Up
+                        ((selected -= window))
+                        ((selected < 0)) && selected=0
+                        ((selected < offset)) && offset=$selected
+                        redraw=1
+                        ;;
+                    "[6~") # Page Down
+                        ((selected += window))
+                        ((selected >= total)) && selected=$((total - 1))
+                        ((selected >= offset + window)) && ((offset = selected - window + 1))
+                        redraw=1
+                        ;;
                 esac
-                _adjust_offset
-                _move_cursor_up
-                _render_window
                 ;;
             "")
                 echo "" > /dev/tty
@@ -248,6 +221,10 @@ _interactive_select() {
                 return
                 ;;
         esac
+        if ((redraw)); then
+            for ((i = 0; i < total_render_lines; i++)); do tput cuu1 2>/dev/null > /dev/tty; done
+            _render_window
+        fi
     done
 }
 
@@ -260,14 +237,10 @@ _render_workspace_item() {
     local size="${FILTERED_SIZES[$i]}"
 
     if [[ $i -eq $selected ]]; then
-        tput el 2>/dev/null > /dev/tty
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${display_folder}${RESET}" > /dev/tty
-        tput el 2>/dev/null > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     else
-        tput el 2>/dev/null > /dev/tty
         echo -e "    ${DIM}[$((i + 1))]${RESET} ${display_folder}" > /dev/tty
-        tput el 2>/dev/null > /dev/tty
         echo -e "        ${DIM}${size}  ·  ${mtime_human}${RESET}" > /dev/tty
     fi
 }
@@ -278,7 +251,6 @@ ACTION_DESCS=()
 
 _render_action_item() {
     local i=$1 selected=$2
-    tput el 2>/dev/null > /dev/tty
     if [[ $i -eq $selected ]]; then
         echo -e "  ${CYAN}${BOLD}▸ [$((i + 1))]${RESET} ${BOLD}${ACTION_LABELS[$i]}${RESET}  ${DIM}${ACTION_DESCS[$i]}${RESET}" > /dev/tty
     else
@@ -343,9 +315,7 @@ main() {
     FILTERED_MTIMES=()
 
     for ((i = 0; i < total; i++)); do
-        local decoded_folder_i
-        decoded_folder_i=$(uri_decode "${ALL_FOLDERS[$i]}")
-        if [[ -z "$filter_keyword" ]] || echo "${ALL_FOLDERS[$i]} ${decoded_folder_i}" | grep -qi "$filter_keyword"; then
+        if [[ -z "$filter_keyword" ]] || echo "${ALL_FOLDERS[$i]}" | grep -qi "$filter_keyword"; then
             FILTERED_HASHES+=("${ALL_HASHES[$i]}")
             FILTERED_FOLDERS+=("${ALL_FOLDERS[$i]}")
             FILTERED_SIZES+=("${ALL_SIZES[$i]}")
@@ -426,17 +396,16 @@ do_migrate() {
     echo -e "${DIM}当前 URI: ${sel_folder}${RESET}"
     echo ""
 
-    # 智能提取可编辑部分
+    # 智能提取可编辑部分（完整 URL decode）
     local editable_part
     if [[ "$sel_folder" == vscode-remote://* ]]; then
-        # 提取实际路径部分（authority 后的路径）
         editable_part=$(echo "$sel_folder" | sed 's|vscode-remote://[^/]*/||')
     elif [[ "$sel_folder" == file://* ]]; then
         editable_part=$(echo "$sel_folder" | sed 's|file://||')
     else
         editable_part="$sel_folder"
     fi
-    editable_part=$(uri_decode "$editable_part")
+    editable_part=$(url_decode "$editable_part")
 
     echo -ne "${CYAN}当前路径: ${RESET}${editable_part}"
     echo ""
@@ -448,10 +417,10 @@ do_migrate() {
         exit 0
     fi
 
-    # 重新编码回 URI
-    local new_uri
+    # 重新编码回 URI（中文等非 ASCII 字符需要 percent-encode）
     local new_path_encoded
-    new_path_encoded=$(uri_encode_path "$new_path")
+    new_path_encoded=$(url_encode_path "$new_path")
+    local new_uri
     if [[ "$sel_folder" == vscode-remote://* ]]; then
         local authority
         authority=$(echo "$sel_folder" | sed 's|vscode-remote://\([^/]*\)/.*|\1|')
