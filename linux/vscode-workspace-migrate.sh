@@ -506,6 +506,12 @@ do_migrate() {
     echo -e "${BOLD}变更预览:${RESET}"
     echo -e "  ${RED}- ${sel_folder}${RESET}"
     echo -e "  ${GREEN}+ ${new_uri}${RESET}"
+
+    # 计算新 URI 的 MD5 hash（VS Code 用 MD5(URI) 作为 storage 目录名）
+    local new_hash
+    new_hash=$(printf '%s' "$new_uri" | md5sum | cut -d' ' -f1)
+    echo ""
+    echo -e "  ${DIM}storage 目录: ${sel_hash} → ${new_hash}${RESET}"
     echo ""
 
     # 查找所有相关 storage 目录（Windows 端 + WSL 端可能有同 hash 的目录）
@@ -523,6 +529,18 @@ do_migrate() {
         echo ""
     fi
 
+    # 检查新 hash 目录是否已存在
+    for ws_dir in "${related_dirs[@]}"; do
+        local parent_dir
+        parent_dir=$(dirname "$ws_dir")
+        local new_dir="${parent_dir}/${new_hash}"
+        if [[ -d "$new_dir" ]]; then
+            echo -e "${RED}✗ 目标 storage 目录已存在: ${new_dir}${RESET}"
+            echo -e "${DIM}  新路径可能已有 workspace 数据，请先确认或删除。${RESET}"
+            return
+        fi
+    done
+
     echo -ne "${YELLOW}确认执行迁移? [y/N]:${RESET} "
     read -r confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -530,9 +548,13 @@ do_migrate() {
         return
     fi
 
-    # 执行迁移
+    # 执行迁移：更新 workspace.json + 重命名目录
     for ws_dir in "${related_dirs[@]}"; do
         local ws_json="${ws_dir}/workspace.json"
+        local parent_dir
+        parent_dir=$(dirname "$ws_dir")
+        local new_dir="${parent_dir}/${new_hash}"
+
         if [[ -f "$ws_json" ]]; then
             cp "$ws_json" "${ws_json}.bak"
             echo -e "${DIM}  备份: ${ws_json}.bak${RESET}"
@@ -545,6 +567,10 @@ do_migrate() {
             sed -i "s|${escaped_old}|${escaped_new}|g" "$ws_json"
             echo -e "${GREEN}  ✓ 已更新: ${ws_json}${RESET}"
         fi
+
+        # 重命名 storage 目录到新 hash
+        mv "$ws_dir" "$new_dir"
+        echo -e "${GREEN}  ✓ 已重命名: ${ws_dir} → ${new_dir}${RESET}"
     done
 
     echo ""
@@ -553,9 +579,9 @@ do_migrate() {
     echo -e "${DIM}后续步骤:${RESET}"
     echo -e "  1. 重命名项目文件夹到新路径"
     echo -e "  2. 用 VS Code 打开新路径"
-    echo -e "  3. Copilot Chat 历史将自动恢复"
+    echo -e "  3. Copilot Chat 历史、信任设置等将自动恢复"
     echo ""
-    echo -e "${DIM}如需回滚，恢复 workspace.json.bak 即可。${RESET}"
+    echo -e "${DIM}如需回滚，将目录 ${new_hash} 重命名回 ${sel_hash} 并恢复 workspace.json.bak${RESET}"
 }
 
 # ── 删除操作 ──
