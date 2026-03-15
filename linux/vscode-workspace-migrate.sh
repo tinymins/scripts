@@ -63,7 +63,15 @@ scan_workspaces() {
     WORKSPACE_STORAGE_DIRS=()
     WORKSPACE_MTIMES=()
 
-    for ws_dir in "$storage_dir"/*/; do
+    # 统计总目录数用于进度显示
+    local dirs=("$storage_dir"/*/)
+    local dir_total=${#dirs[@]}
+    local dir_idx=0
+
+    for ws_dir in "${dirs[@]}"; do
+        ((dir_idx++)) || true
+        printf '\r\033[K  \033[2m扫描中 [%d/%d] ...\033[0m' "$dir_idx" "$dir_total" > /dev/tty
+
         local ws_json="${ws_dir}workspace.json"
         [[ -f "$ws_json" ]] || continue
 
@@ -91,6 +99,7 @@ scan_workspaces() {
         WORKSPACE_MTIMES+=("$mtime_human|$mtime")
         ((idx++)) || true
     done
+    printf '\r\033[K' > /dev/tty
 }
 
 # ── URL percent-decode（完整 UTF-8 支持）──
@@ -131,9 +140,18 @@ _interactive_select() {
     local total=$1
     local renderer=$2  # 渲染函数名
     local lines_per_item=${3:-2}  # 每项占几行
-    local page_size=${4:-10}  # 每页显示条数
+    local page_size=${4:-0}  # 每页显示条数，0=自动检测
     local selected=0
     local offset=0  # 当前窗口起始 index
+
+    # 自动检测终端高度，计算 page_size
+    if [[ $page_size -eq 0 ]]; then
+        local term_lines
+        term_lines=$(tput lines 2>/dev/null) || term_lines=24
+        # 预留 3 行给状态栏/提示等
+        page_size=$(( (term_lines - 3) / lines_per_item ))
+        ((page_size < 3)) && page_size=3
+    fi
 
     # 非交互终端回退
     if [[ ! -t 0 ]]; then
@@ -290,6 +308,7 @@ main() {
     ALL_STORAGE_DIRS_UNIQUE=("${storage_dirs[@]}")
 
     # 2. 扫描所有 workspace
+    echo -e "${DIM}正在扫描 workspace 存储...${RESET}"
     ALL_HASHES=()
     ALL_FOLDERS=()
     ALL_SIZES=()
