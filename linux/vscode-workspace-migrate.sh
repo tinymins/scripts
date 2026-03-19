@@ -637,9 +637,9 @@ do_migrate() {
         echo ""
 
         # 收集所有匹配的 WSL 端 workspace storage 目录（含 -1, -2 等后缀）
-        local wsl_ws_base="$HOME/.vscode-server/data/User/workspaceStorage"
+        local wsl_ws_base="\$HOME/.vscode-server/data/User/workspaceStorage"
         local wsl_dirs=()
-        for d in "${wsl_ws_base}/${sel_hash}" "${wsl_ws_base}/${sel_hash}"-*; do
+        for d in "$HOME/.vscode-server/data/User/workspaceStorage/${sel_hash}" "$HOME/.vscode-server/data/User/workspaceStorage/${sel_hash}"-*; do
             [[ -d "$d" ]] && wsl_dirs+=("$(basename "$d")")
         done
 
@@ -648,39 +648,26 @@ do_migrate() {
         else
             echo -e "${BOLD}  迁移 vscode-server workspace storage 到新发行版:${RESET}"
             for wd in "${wsl_dirs[@]}"; do
-                # 对应的新名称：把原 hash 替换为 new_hash，保留后缀
-                local suffix="${wd#${sel_hash}}"
-                echo -e "     ${DIM}旧:${RESET} ~/.vscode-server/data/User/workspaceStorage/${wd}"
-                echo -e "     ${DIM}新:${RESET} ~/.vscode-server/data/User/workspaceStorage/${new_hash}${suffix}"
+                echo -e "     ${DIM}旧:${RESET} ${wsl_ws_base}/${wd}"
+                echo -e "     ${DIM}新:${RESET} ${wsl_ws_base}/${new_hash}"
             done
             echo ""
             echo -e "${BOLD}  快速迁移命令:${RESET}"
-            # 先 tar 到本地 /tmp 再 cp 到 Windows，避免 9P 直写慢
             local win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             if [[ -z "$WIN_USER" ]]; then
                 echo -e "  ${RED}⚠ 未检测到 Windows 用户名，请手动替换命令中的 <WIN_USER>${RESET}"
                 win_tmp="/mnt/c/Users/<WIN_USER>/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             fi
 
-            # 构建 tar 参数列表
-            local tar_args=""
-            for wd in "${wsl_dirs[@]}"; do
-                tar_args+=" \".vscode-server/data/User/workspaceStorage/${wd}\""
-            done
-
-            # 构建 mv 命令列表
-            local mv_cmds=""
-            for wd in "${wsl_dirs[@]}"; do
-                local suffix="${wd#${sel_hash}}"
-                mv_cmds+="mv \$HOME/.vscode-server/data/User/workspaceStorage/${wd} \$HOME/.vscode-server/data/User/workspaceStorage/${new_hash}${suffix} && "
-            done
-            mv_cmds="${mv_cmds% && }"  # 去掉尾部 &&
+            # 源端：先 rename 到新 hash（消除 -1 后缀），再 tar 打包
+            # 多个匹配目录取第一个（最主要的那个）
+            local src_dir="${wsl_dirs[0]}"
 
             echo -e "  ${DIM}# 在旧系统 (${old_distro_name}) 中执行:${RESET}"
-            echo -e "  ${CYAN}tar czf /tmp/wsmigrate.tar.gz -C \$HOME${tar_args} && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
+            echo -e "  ${CYAN}mv ${wsl_ws_base}/${src_dir} ${wsl_ws_base}/${new_hash} && tar czf /tmp/wsmigrate.tar.gz -C \$HOME \".vscode-server/data/User/workspaceStorage/${new_hash}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
             echo ""
             echo -e "  ${DIM}# 在新系统 (${new_distro_name}) 中执行:${RESET}"
-            echo -e "  ${CYAN}cp ${win_tmp} /tmp/wsmigrate.tar.gz && tar xzf /tmp/wsmigrate.tar.gz -C \$HOME && ${mv_cmds}; rm /tmp/wsmigrate.tar.gz ${win_tmp}${RESET}"
+            echo -e "  ${CYAN}cp ${win_tmp} /tmp/wsmigrate.tar.gz && tar xzf /tmp/wsmigrate.tar.gz -C \$HOME; rm /tmp/wsmigrate.tar.gz ${win_tmp}${RESET}"
         fi
         echo ""
         echo -e "  ${DIM}Windows 端 workspace storage 已自动迁移完成（Chat 历史等数据）${RESET}"
