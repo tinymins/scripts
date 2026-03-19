@@ -117,6 +117,12 @@ print(urllib.parse.quote(path, safe="/:@!$&'()*+,;=-._~"))
 PYEOF
 }
 
+# ── URL percent-encode（authority 部分，+ 等字符需编码）──
+url_encode_authority() {
+    python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe='-._~'))" "$1" 2>/dev/null \
+        || echo "$1"
+}
+
 # ── 对 folder URI 做人类可读化 ──
 humanize_uri() {
     local uri="$1"
@@ -463,9 +469,27 @@ for line in sys.stdin:
 do_migrate() {
     local sel_hash="$1" sel_folder="$2" sel_ws_dir="$3"
 
-    echo -e "${YELLOW}输入新的文件夹路径（仅修改部分即可）:${RESET}"
+    echo -e "${YELLOW}输入新的目标（可修改远程和路径）:${RESET}"
     echo -e "${DIM}当前 URI: ${sel_folder}${RESET}"
     echo ""
+
+    local old_authority="" new_authority="" authority_changed=false
+
+    # 对 vscode-remote URI，允许编辑 authority（如 WSL 发行版名）
+    if [[ "$sel_folder" == vscode-remote://* ]]; then
+        old_authority=$(echo "$sel_folder" | sed 's|vscode-remote://\([^/]*\)/.*|\1|')
+        local old_authority_decoded
+        old_authority_decoded=$(url_decode "$old_authority")
+
+        echo -e "${CYAN}当前远程: ${RESET}${old_authority_decoded}"
+        local authority_prompt=$'\001\033[0;36m\002新远程:   \001\033[0m\002'
+        read -r -e -i "$old_authority_decoded" -p "$authority_prompt" new_authority_decoded
+
+        [[ -z "$new_authority_decoded" ]] && new_authority_decoded="$old_authority_decoded"
+        new_authority=$(url_encode_authority "$new_authority_decoded")
+        [[ "$new_authority" != "$old_authority" ]] && authority_changed=true
+        echo ""
+    fi
 
     # 智能提取可编辑部分（完整 URL decode）
     local editable_part
@@ -483,8 +507,10 @@ do_migrate() {
     local prompt=$'\001\033[0;36m\002新路径:   \001\033[0m\002'
     read -r -e -i "$editable_part" -p "$prompt" new_path
 
-    if [[ -z "$new_path" || "$new_path" == "$editable_part" ]]; then
-        echo -e "${YELLOW}路径未变更。${RESET}"
+    [[ -z "$new_path" ]] && new_path="$editable_part"
+
+    if [[ "$new_path" == "$editable_part" && "$authority_changed" != true ]]; then
+        echo -e "${YELLOW}未做任何变更。${RESET}"
         return
     fi
 
@@ -493,9 +519,7 @@ do_migrate() {
     new_path_encoded=$(url_encode_path "$new_path")
     local new_uri
     if [[ "$sel_folder" == vscode-remote://* ]]; then
-        local authority
-        authority=$(echo "$sel_folder" | sed 's|vscode-remote://\([^/]*\)/.*|\1|')
-        new_uri="vscode-remote://${authority}/${new_path_encoded}"
+        new_uri="vscode-remote://${new_authority}/${new_path_encoded}"
     elif [[ "$sel_folder" == file://* ]]; then
         new_uri="file://${new_path_encoded}"
     else
@@ -576,10 +600,50 @@ do_migrate() {
     echo ""
     echo -e "${GREEN}${BOLD}✓ 迁移完成！${RESET}"
     echo ""
-    echo -e "${DIM}后续步骤:${RESET}"
-    echo -e "  1. 重命名项目文件夹到新路径"
-    echo -e "  2. 用 VS Code 打开新路径"
-    echo -e "  3. Copilot Chat 历史、信任设置等将自动恢复"
+
+    # ── 跨 WSL 迁移时输出手动步骤 ──
+    if [[ "$authority_changed" == true ]]; then
+        local old_distro_decoded new_distro_decoded
+        old_distro_decoded=$(url_decode "$old_authority")
+        new_distro_decoded=$(url_decode "$new_authority")
+
+        # 从 authority 中提取 distro 名（去掉 wsl+ 前缀）
+        local old_distro_name="${old_distro_decoded#wsl+}"
+        local new_distro_name="${new_distro_decoded#wsl+}"
+
+        local old_path_decoded
+        old_path_decoded=$(url_decode "$(echo "$sel_folder" | sed 's|vscode-remote://[^/]*/||')")
+
+        echo -e "${BOLD}${YELLOW}⚠ 检测到跨 WSL 发行版迁移（${old_distro_name} → ${new_distro_name}），需手动完成以下步骤:${RESET}"
+        echo ""
+        echo -e "${BOLD}  1. 复制项目源码到新发行版:${RESET}"
+        echo -e "     ${DIM}旧:${RESET} ${old_path_decoded}"
+        echo -e "     ${DIM}新:${RESET} ${new_path}"
+        echo ""
+        echo -e "${BOLD}  2. 复制 vscode-server workspace storage 到新发行版:${RESET}"
+        echo -e "     ${DIM}旧:${RESET} ~/.vscode-server/data/User/workspaceStorage/${sel_hash}"
+        echo -e "     ${DIM}新:${RESET} ~/.vscode-server/data/User/workspaceStorage/${new_hash}"
+        echo ""
+        echo -e "${BOLD}  3. 复制 vscode-server 扩展（如尚未安装）:${RESET}"
+        echo -e "     ${DIM}旧:${RESET} ~/.vscode-server/extensions/"
+        echo -e "     ${DIM}新:${RESET} ~/.vscode-server/extensions/"
+        echo ""
+        echo -e "${BOLD}  快速迁移命令:${RESET}"
+        # 使用 Windows 用户目录中转，避免 /mnt/c/ 根目录权限问题
+        local tmp_tar="/mnt/c/Users/\$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\\r\\n')/tmp-wsmigrate.tar.gz"
+        echo -e "  ${DIM}# 在旧系统 (${old_distro_name}) 中执行:${RESET}"
+        echo -e "  ${CYAN}tar czf ${tmp_tar} -C ~/ \"${old_path_decoded#$HOME/}\" \".vscode-server/data/User/workspaceStorage/${sel_hash}\" \".vscode-server/extensions\"${RESET}"
+        echo ""
+        echo -e "  ${DIM}# 在新系统 (${new_distro_name}) 中执行:${RESET}"
+        echo -e "  ${CYAN}tar xzf ${tmp_tar} -C ~/ && mv ~/.vscode-server/data/User/workspaceStorage/${sel_hash} ~/.vscode-server/data/User/workspaceStorage/${new_hash}; rm ${tmp_tar}${RESET}"
+        echo ""
+        echo -e "  ${DIM}Windows 端 workspace storage 已自动迁移完成（Chat 历史等数据）${RESET}"
+    else
+        echo -e "${DIM}后续步骤:${RESET}"
+        echo -e "  1. 重命名项目文件夹到新路径"
+        echo -e "  2. 用 VS Code 打开新路径"
+        echo -e "  3. Copilot Chat 历史、信任设置等将自动恢复"
+    fi
     echo ""
     echo -e "${DIM}如需回滚，将目录 ${new_hash} 重命名回 ${sel_hash} 并恢复 workspace.json.bak${RESET}"
 }
