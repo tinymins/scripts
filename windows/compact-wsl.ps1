@@ -109,7 +109,16 @@ while ($true) {
     # 压缩每个 VHDX
     foreach ($distro in $selected) {
         $vhdx = $distro.VhdxPath
-        $sizeBefore = [math]::Round((Get-Item $vhdx).Length / 1GB, 2)
+        $fileItem = Get-Item $vhdx
+        $sizeBefore = [math]::Round($fileItem.Length / 1GB, 2)
+
+        # 检查 NTFS 压缩
+        if ($fileItem.Attributes -band [System.IO.FileAttributes]::Compressed) {
+            $sizeOnDisk = [math]::Round((New-Object -ComObject Scripting.FileSystemObject).GetFile($vhdx).Size / 1GB, 2)
+            Write-Host "`n[$($distro.Name)] 已启用 NTFS 压缩 (逻辑 $sizeBefore GB, 实占 $sizeOnDisk GB), 跳过 Optimize-VHD" -ForegroundColor DarkYellow
+            continue
+        }
+
         Write-Host "`n[$($distro.Name)] 压缩前: $sizeBefore GB" -ForegroundColor Cyan
 
         if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
