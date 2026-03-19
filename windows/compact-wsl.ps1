@@ -14,117 +14,121 @@ if (-not (Test-Path $lxssPath)) {
     exit 1
 }
 
-$distros = Get-ChildItem $lxssPath | ForEach-Object {
-    $name = (Get-ItemProperty $_.PSPath).DistributionName
-    $basePath = (Get-ItemProperty $_.PSPath).BasePath
-    if ($name -and $basePath) {
-        # BasePath 可能是 \\?\开头的路径，转换为普通路径
-        $basePath = $basePath -replace '^\\\\\?\\', ''
-        $vhdx = Join-Path $basePath "ext4.vhdx"
-        if (Test-Path $vhdx) {
-            [PSCustomObject]@{ Name = $name; VhdxPath = $vhdx }
+while ($true) {
+    # 刷新发行版列表和大小
+    $distros = Get-ChildItem $lxssPath | ForEach-Object {
+        $name = (Get-ItemProperty $_.PSPath).DistributionName
+        $basePath = (Get-ItemProperty $_.PSPath).BasePath
+        if ($name -and $basePath) {
+            $basePath = $basePath -replace '^\\\\\?\\', ''
+            $vhdx = Join-Path $basePath "ext4.vhdx"
+            if (Test-Path $vhdx) {
+                [PSCustomObject]@{ Name = $name; VhdxPath = $vhdx }
+            }
         }
-    }
-} | Where-Object { $_ -ne $null }
+    } | Where-Object { $_ -ne $null }
 
-if (-not $distros -or $distros.Count -eq 0) {
-    Write-Error "未找到任何 WSL2 发行版 (ext4.vhdx)"
-    exit 1
-}
-
-# 显示列表让用户选择
-Write-Host "`n可用的 WSL2 发行版:" -ForegroundColor Cyan
-for ($i = 0; $i -lt $distros.Count; $i++) {
-    $size = [math]::Round((Get-Item $distros[$i].VhdxPath).Length / 1GB, 2)
-    Write-Host "  [$($i + 1)] $($distros[$i].Name) — $size GB"
-}
-Write-Host "  [0] 全部压缩"
-Write-Host ""
-
-$choice = Read-Host "请选择 (0-$($distros.Count))"
-if ($choice -notmatch '^\d+$' -or [int]$choice -lt 0 -or [int]$choice -gt $distros.Count) {
-    Write-Error "无效选择"
-    exit 1
-}
-
-if ([int]$choice -eq 0) {
-    $selected = $distros
-} else {
-    $selected = @($distros[[int]$choice - 1])
-}
-
-# 询问是否零填充
-Write-Host "零填充空闲空间可以大幅提升压缩效果，但会额外写入一轮数据" -ForegroundColor DarkGray
-$zeroFill = Read-Host "是否零填充? (y/N)"
-
-# 对选中的发行版执行清理
-foreach ($distro in $selected) {
-    Write-Host "`n[$($distro.Name)] 正在查看磁盘使用情况..." -ForegroundColor Cyan
-    wsl -d $distro.Name -u root -- df -h /
-
-    if ($zeroFill -eq 'y' -or $zeroFill -eq 'Y') {
-        Write-Host "[$($distro.Name)] 正在零填充空闲空间 (可能需要几分钟)..." -ForegroundColor Yellow
-        wsl -d $distro.Name -u root -- bash -c "dd if=/dev/zero of=/tmp/.zero_fill bs=1M 2>/dev/null; rm -f /tmp/.zero_fill"
+    if (-not $distros -or $distros.Count -eq 0) {
+        Write-Host "未找到任何 WSL2 发行版 (ext4.vhdx)" -ForegroundColor Red
+        pause
+        exit 1
     }
 
-    Write-Host "[$($distro.Name)] 正在执行 fstrim..." -ForegroundColor Yellow
-    wsl -d $distro.Name -u root fstrim /
-}
-
-# 关闭 WSL
-Write-Host "`n正在关闭 WSL..." -ForegroundColor Yellow
-wsl --shutdown
-
-# 等待所有 VHDX 文件解锁
-Write-Host "等待 VHDX 文件释放..." -ForegroundColor Yellow
-$timeout = 120
-$elapsed = 0
-$allFree = $false
-while ($elapsed -lt $timeout) {
-    $allFree = $true
-    foreach ($d in $selected) {
-        try {
-            $fs = [System.IO.File]::Open($d.VhdxPath, 'Open', 'ReadWrite', 'None')
-            $fs.Close()
-        } catch {
-            $allFree = $false
-            break
-        }
+    # 显示列表让用户选择
+    Write-Host "`n可用的 WSL2 发行版:" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $distros.Count; $i++) {
+        $size = [math]::Round((Get-Item $distros[$i].VhdxPath).Length / 1GB, 2)
+        Write-Host "  [$($i + 1)] $($distros[$i].Name) — $size GB"
     }
-    if ($allFree) { break }
-    Start-Sleep -Seconds 3
-    $elapsed += 3
-    Write-Host "  已等待 ${elapsed}s..." -ForegroundColor DarkGray
-}
-if (-not $allFree) {
-    Write-Host "错误: VHDX 文件在 ${timeout}s 后仍被占用，请检查 Docker Desktop 等程序是否在运行" -ForegroundColor Red
-    pause
-    exit 1
-}
-Write-Host "VHDX 文件已就绪" -ForegroundColor Green
+    Write-Host "  [0] 全部压缩"
+    Write-Host "  [q] 退出"
+    Write-Host ""
 
-# 压缩每个 VHDX
-foreach ($distro in $selected) {
-    $vhdx = $distro.VhdxPath
-    $sizeBefore = [math]::Round((Get-Item $vhdx).Length / 1GB, 2)
-    Write-Host "`n[$($distro.Name)] 压缩前: $sizeBefore GB" -ForegroundColor Cyan
+    $choice = Read-Host "请选择"
+    if ($choice -eq 'q' -or $choice -eq 'Q') { break }
+    if ($choice -notmatch '^\d+$' -or [int]$choice -lt 0 -or [int]$choice -gt $distros.Count) {
+        Write-Host "无效选择，请重新输入" -ForegroundColor Red
+        continue
+    }
 
-    if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
-        Optimize-VHD -Path $vhdx -Mode Full
+    if ([int]$choice -eq 0) {
+        $selected = $distros
     } else {
-        Write-Host "Optimize-VHD 不可用，使用 diskpart..." -ForegroundColor DarkYellow
-        @"
+        $selected = @($distros[[int]$choice - 1])
+    }
+
+    # 询问是否零填充
+    Write-Host "零填充空闲空间可以大幅提升压缩效果，但会额外写入一轮数据" -ForegroundColor DarkGray
+    $zeroFill = Read-Host "是否零填充? (y/N)"
+
+    # 对选中的发行版执行清理
+    foreach ($distro in $selected) {
+        Write-Host "`n[$($distro.Name)] 正在查看磁盘使用情况..." -ForegroundColor Cyan
+        wsl -d $distro.Name -u root -- df -h /
+
+        if ($zeroFill -eq 'y' -or $zeroFill -eq 'Y') {
+            Write-Host "[$($distro.Name)] 正在零填充空闲空间 (可能需要几分钟)..." -ForegroundColor Yellow
+            wsl -d $distro.Name -u root -- bash -c "dd if=/dev/zero of=/tmp/.zero_fill bs=1M 2>/dev/null; rm -f /tmp/.zero_fill"
+        }
+
+        Write-Host "[$($distro.Name)] 正在执行 fstrim..." -ForegroundColor Yellow
+        wsl -d $distro.Name -u root fstrim /
+    }
+
+    # 关闭 WSL
+    Write-Host "`n正在关闭 WSL..." -ForegroundColor Yellow
+    wsl --shutdown
+
+    # 等待所有 VHDX 文件解锁
+    Write-Host "等待 VHDX 文件释放..." -ForegroundColor Yellow
+    $timeout = 120
+    $elapsed = 0
+    $allFree = $false
+    while ($elapsed -lt $timeout) {
+        $allFree = $true
+        foreach ($d in $selected) {
+            try {
+                $fs = [System.IO.File]::Open($d.VhdxPath, 'Open', 'ReadWrite', 'None')
+                $fs.Close()
+            } catch {
+                $allFree = $false
+                break
+            }
+        }
+        if ($allFree) { break }
+        Start-Sleep -Seconds 3
+        $elapsed += 3
+        Write-Host "  已等待 ${elapsed}s..." -ForegroundColor DarkGray
+    }
+    if (-not $allFree) {
+        Write-Host "错误: VHDX 文件在 ${timeout}s 后仍被占用，请检查 Docker Desktop 等程序是否在运行" -ForegroundColor Red
+        continue
+    }
+    Write-Host "VHDX 文件已就绪" -ForegroundColor Green
+
+    # 压缩每个 VHDX
+    foreach ($distro in $selected) {
+        $vhdx = $distro.VhdxPath
+        $sizeBefore = [math]::Round((Get-Item $vhdx).Length / 1GB, 2)
+        Write-Host "`n[$($distro.Name)] 压缩前: $sizeBefore GB" -ForegroundColor Cyan
+
+        if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
+            Optimize-VHD -Path $vhdx -Mode Full
+        } else {
+            Write-Host "Optimize-VHD 不可用，使用 diskpart..." -ForegroundColor DarkYellow
+            @"
 select vdisk file="$vhdx"
 attach vdisk readonly
 compact vdisk
 detach vdisk
 exit
 "@ | diskpart
+        }
+
+        $sizeAfter = [math]::Round((Get-Item $vhdx).Length / 1GB, 2)
+        $saved = [math]::Round($sizeBefore - $sizeAfter, 2)
+        Write-Host "[$($distro.Name)] 压缩后: $sizeAfter GB (节省 $saved GB)" -ForegroundColor Green
     }
 
-    $sizeAfter = [math]::Round((Get-Item $vhdx).Length / 1GB, 2)
-    $saved = [math]::Round($sizeBefore - $sizeAfter, 2)
-    Write-Host "[$($distro.Name)] 压缩后: $sizeAfter GB (节省 $saved GB)" -ForegroundColor Green
+    Write-Host "`n本轮完成!" -ForegroundColor Green
 }
-
-Write-Host "`n完成!" -ForegroundColor Green
