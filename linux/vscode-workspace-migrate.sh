@@ -659,20 +659,40 @@ do_migrate() {
         if [[ ${#wsl_renamed[@]} -eq 0 ]]; then
             echo -e "${DIM}  WSL 端无需迁移（未找到 workspace storage 目录）${RESET}"
         else
-            echo ""
-            echo -e "${BOLD}  手动迁移 WSL 端数据到新发行版:${RESET}"
-            echo ""
             local win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             if [[ -z "$WIN_USER" ]]; then
                 echo -e "  ${RED}⚠ 未检测到 Windows 用户名，请手动替换命令中的 <WIN_USER>${RESET}"
                 win_tmp="/mnt/c/Users/<WIN_USER>/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             fi
 
+            local tar_src=".vscode-server/data/User/workspaceStorage/${new_hash}"
+            local cmd_tar="tar czf /tmp/wsmigrate.tar.gz -C \$HOME \"${tar_src}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz"
+            local cmd_remote="cp ${win_tmp} /tmp/wsmigrate.tar.gz && tar xzf /tmp/wsmigrate.tar.gz -C \$HOME; rm /tmp/wsmigrate.tar.gz ${win_tmp}"
+
+            echo ""
+            echo -e "${BOLD}  迁移 WSL 端数据到新发行版:${RESET}"
+            echo ""
             echo -e "  ${DIM}# 在旧系统 (${old_distro_name}) 中执行:${RESET}"
-            echo -e "  ${CYAN}tar czf /tmp/wsmigrate.tar.gz -C \$HOME \".vscode-server/data/User/workspaceStorage/${new_hash}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
+            echo -e "  ${CYAN}${cmd_tar}${RESET}"
             echo ""
             echo -e "  ${DIM}# 在新系统 (${new_distro_name}) 中执行:${RESET}"
-            echo -e "  ${CYAN}cp ${win_tmp} /tmp/wsmigrate.tar.gz && tar xzf /tmp/wsmigrate.tar.gz -C \$HOME; rm /tmp/wsmigrate.tar.gz ${win_tmp}${RESET}"
+            echo -e "  ${CYAN}${cmd_remote}${RESET}"
+            echo ""
+
+            # 提问是否立即执行本机迁出
+            echo -ne "${YELLOW}是否立即执行本机的迁出打包? [Y/n]:${RESET} "
+            read -r do_tar
+            if [[ "$do_tar" != "n" && "$do_tar" != "N" ]]; then
+                echo -e "${DIM}  正在打包...${RESET}"
+                if eval "$cmd_tar" 2>&1; then
+                    echo -e "${GREEN}  ✓ 迁出打包完成！${RESET}"
+                    echo ""
+                    echo -e "${BOLD}在新系统 (${new_distro_name}) 中执行以下命令完成迁入:${RESET}"
+                    echo -e "  ${CYAN}${cmd_remote}${RESET}"
+                else
+                    echo -e "${RED}  ✗ 打包失败，请手动执行上述命令${RESET}"
+                fi
+            fi
         fi
         echo ""
         echo -e "  ${DIM}Windows 端 workspace storage 已自动迁移完成（Chat 历史等数据）${RESET}"
