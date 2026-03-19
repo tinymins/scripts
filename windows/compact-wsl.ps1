@@ -53,9 +53,21 @@ if ([int]$choice -eq 0) {
     $selected = @($distros[[int]$choice - 1])
 }
 
-# 对选中的发行版执行 fstrim
+# 询问是否零填充
+Write-Host "零填充空闲空间可以大幅提升压缩效果，但会额外写入一轮数据" -ForegroundColor DarkGray
+$zeroFill = Read-Host "是否零填充? (y/N)"
+
+# 对选中的发行版执行清理
 foreach ($distro in $selected) {
-    Write-Host "`n[$($distro.Name)] 正在执行 fstrim..." -ForegroundColor Yellow
+    Write-Host "`n[$($distro.Name)] 正在查看磁盘使用情况..." -ForegroundColor Cyan
+    wsl -d $distro.Name -u root -- df -h /
+
+    if ($zeroFill -eq 'y' -or $zeroFill -eq 'Y') {
+        Write-Host "[$($distro.Name)] 正在零填充空闲空间 (可能需要几分钟)..." -ForegroundColor Yellow
+        wsl -d $distro.Name -u root -- bash -c "dd if=/dev/zero of=/tmp/.zero_fill bs=1M 2>/dev/null; rm -f /tmp/.zero_fill"
+    }
+
+    Write-Host "[$($distro.Name)] 正在执行 fstrim..." -ForegroundColor Yellow
     wsl -d $distro.Name -u root fstrim /
 }
 
