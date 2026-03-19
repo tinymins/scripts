@@ -637,35 +637,39 @@ do_migrate() {
         echo -e "${BOLD}${YELLOW}⚠ 检测到跨 WSL 发行版迁移（${old_distro_name} → ${new_distro_name}），需手动完成以下步骤:${RESET}"
         echo ""
 
-        # 收集所有匹配的 WSL 端 workspace storage 目录（含 -1, -2 等后缀）
-        local wsl_ws_base="\$HOME/.vscode-server/data/User/workspaceStorage"
-        local wsl_dirs=()
-        for d in "$HOME/.vscode-server/data/User/workspaceStorage/${sel_hash}" "$HOME/.vscode-server/data/User/workspaceStorage/${sel_hash}"-*; do
-            [[ -d "$d" ]] && wsl_dirs+=("$(basename "$d")")
+        # 收集并立即 rename 所有匹配的 WSL 端 workspace storage 目录（含 -1, -2 等后缀）
+        local wsl_ws_base="$HOME/.vscode-server/data/User/workspaceStorage"
+        local wsl_renamed=()
+        for d in "${wsl_ws_base}/${sel_hash}" "${wsl_ws_base}/${sel_hash}"-*; do
+            [[ -d "$d" ]] || continue
+            local old_name
+            old_name=$(basename "$d")
+            # 目标名：替换 sel_hash 为 new_hash，去掉 -N 后缀
+            local target="${wsl_ws_base}/${new_hash}"
+            if [[ -d "$target" ]]; then
+                echo -e "${YELLOW}  ⚠ 目标已存在，跳过: ${target}${RESET}"
+                continue
+            fi
+            mv "$d" "$target"
+            echo -e "${GREEN}  ✓ WSL 端已重命名: ${old_name} → ${new_hash}${RESET}"
+            wsl_renamed+=("${new_hash}")
+            break  # 只迁移第一个匹配的
         done
 
-        if [[ ${#wsl_dirs[@]} -eq 0 ]]; then
+        if [[ ${#wsl_renamed[@]} -eq 0 ]]; then
             echo -e "${DIM}  WSL 端无需迁移（未找到 workspace storage 目录）${RESET}"
         else
-            echo -e "${BOLD}  迁移 vscode-server workspace storage 到新发行版:${RESET}"
-            for wd in "${wsl_dirs[@]}"; do
-                echo -e "     ${DIM}旧:${RESET} ${wsl_ws_base}/${wd}"
-                echo -e "     ${DIM}新:${RESET} ${wsl_ws_base}/${new_hash}"
-            done
             echo ""
-            echo -e "${BOLD}  快速迁移命令:${RESET}"
+            echo -e "${BOLD}  手动迁移 WSL 端数据到新发行版:${RESET}"
+            echo ""
             local win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             if [[ -z "$WIN_USER" ]]; then
                 echo -e "  ${RED}⚠ 未检测到 Windows 用户名，请手动替换命令中的 <WIN_USER>${RESET}"
                 win_tmp="/mnt/c/Users/<WIN_USER>/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
             fi
 
-            # 源端：先 rename 到新 hash（消除 -1 后缀），再 tar 打包
-            # 多个匹配目录取第一个（最主要的那个）
-            local src_dir="${wsl_dirs[0]}"
-
             echo -e "  ${DIM}# 在旧系统 (${old_distro_name}) 中执行:${RESET}"
-            echo -e "  ${CYAN}mv ${wsl_ws_base}/${src_dir} ${wsl_ws_base}/${new_hash} && tar czf /tmp/wsmigrate.tar.gz -C \$HOME \".vscode-server/data/User/workspaceStorage/${new_hash}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
+            echo -e "  ${CYAN}tar czf /tmp/wsmigrate.tar.gz -C \$HOME \".vscode-server/data/User/workspaceStorage/${new_hash}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
             echo ""
             echo -e "  ${DIM}# 在新系统 (${new_distro_name}) 中执行:${RESET}"
             echo -e "  ${CYAN}cp ${win_tmp} /tmp/wsmigrate.tar.gz && tar xzf /tmp/wsmigrate.tar.gz -C \$HOME; rm /tmp/wsmigrate.tar.gz ${win_tmp}${RESET}"
