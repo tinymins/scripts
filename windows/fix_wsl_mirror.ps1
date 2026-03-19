@@ -32,11 +32,17 @@
 
 # Auto-elevate to Administrator if not already elevated
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    try {
+        Start-Process powershell.exe -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -ErrorAction Stop
+    } catch {
+        Write-Host "ERROR: This script requires Administrator privileges." -ForegroundColor Red
+        Write-Host "Please right-click PowerShell and select 'Run as administrator'." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
     exit
 }
 
-$maxAttempts = 20
 $attempt = 0
 $success = $false
 
@@ -44,9 +50,9 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " WSL Mirror Mode Auto-Recovery" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-while (-not $success -and $attempt -lt $maxAttempts) {
+while (-not $success) {
     $attempt++
-    Write-Host "`n--- Attempt $attempt / $maxAttempts ---" -ForegroundColor Yellow
+    Write-Host "`n--- Attempt $attempt ---" -ForegroundColor Yellow
 
     # 1. Shutdown WSL
     wsl --shutdown 2>$null
@@ -107,11 +113,5 @@ while (-not $success -and $attempt -lt $maxAttempts) {
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-if ($success) {
-    Write-Host " WSL mirror mode is working!" -ForegroundColor Green
-} else {
-    Write-Host " FAILED after $maxAttempts attempts." -ForegroundColor Red
-    Write-Host " Try: netsh winsock reset && netsh int ip reset" -ForegroundColor Yellow
-    Write-Host " Then reboot and run this script again." -ForegroundColor Yellow
-}
+Write-Host " WSL mirror mode is working! (attempt $attempt)" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
