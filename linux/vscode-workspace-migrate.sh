@@ -513,7 +513,8 @@ do_migrate() {
     # 智能提取可编辑部分（完整 URL decode）
     local editable_part
     if [[ "$sel_folder" == vscode-remote://* ]]; then
-        editable_part=$(echo "$sel_folder" | sed 's|vscode-remote://[^/]*/||')
+        # 保留 authority 后的前导 /
+        editable_part=$(echo "$sel_folder" | sed 's|vscode-remote://[^/]*||')
     elif [[ "$sel_folder" == file://* ]]; then
         editable_part=$(echo "$sel_folder" | sed 's|file://||')
     else
