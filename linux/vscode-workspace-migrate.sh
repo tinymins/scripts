@@ -16,17 +16,18 @@ BOLD='\033[1m'
 DIM='\033[2m'
 RESET='\033[0m'
 
+# ── 全局变量：Windows 用户名（WSL 环境下使用）──
+WIN_USER=""
+
 # ── 检测 VS Code workspace storage 路径 ──
 detect_storage_dir() {
     local candidates=()
 
     # WSL: Windows 端 AppData
     if grep -qi microsoft /proc/version 2>/dev/null; then
-        local win_user
-        # 尝试通过 cmd.exe 获取用户名
-        win_user=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n') || true
-        if [[ -n "$win_user" ]]; then
-            local win_path="/mnt/c/Users/${win_user}/AppData/Roaming/Code/User/workspaceStorage"
+        # WIN_USER 由 main() 预设
+        if [[ -n "$WIN_USER" ]]; then
+            local win_path="/mnt/c/Users/${WIN_USER}/AppData/Roaming/Code/User/workspaceStorage"
             [[ -d "$win_path" ]] && candidates+=("$win_path")
         fi
         # 备选：扫描 /mnt/c/Users
@@ -34,6 +35,10 @@ detect_storage_dir() {
             for d in /mnt/c/Users/*/AppData/Roaming/Code/User/workspaceStorage; do
                 [[ -d "$d" ]] && candidates+=("$d")
             done
+            # 从扫描结果中提取用户名
+            if [[ ${#candidates[@]} -gt 0 && -z "$WIN_USER" ]]; then
+                WIN_USER=$(echo "${candidates[0]}" | sed 's|/mnt/c/Users/\([^/]*\)/.*|\1|')
+            fi
         fi
         # WSL server 端
         local wsl_path="$HOME/.vscode-server/data/User/workspaceStorage"
@@ -294,6 +299,20 @@ _render_action_item() {
 main() {
     echo -e "${BOLD}━━━ VS Code Workspace Storage 迁移工具 ━━━${RESET}"
     echo ""
+
+    # 检测 Windows 用户名（在主 shell 中执行，避免子 shell 丢失）
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        WIN_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r\n') || true
+        # 备选：从 /mnt/c/Users 扫描
+        if [[ -z "$WIN_USER" ]]; then
+            for d in /mnt/c/Users/*/AppData/Roaming/Code/User/workspaceStorage; do
+                if [[ -d "$d" ]]; then
+                    WIN_USER=$(echo "$d" | sed 's|/mnt/c/Users/\([^/]*\)/.*|\1|')
+                    break
+                fi
+            done
+        fi
+    fi
 
     # 1. 检测 storage 目录
     local storage_dirs
@@ -616,26 +635,22 @@ do_migrate() {
 
         echo -e "${BOLD}${YELLOW}⚠ 检测到跨 WSL 发行版迁移（${old_distro_name} → ${new_distro_name}），需手动完成以下步骤:${RESET}"
         echo ""
-        echo -e "${BOLD}  1. 复制项目源码到新发行版:${RESET}"
-        echo -e "     ${DIM}旧:${RESET} ${old_path_decoded}"
-        echo -e "     ${DIM}新:${RESET} ${new_path}"
-        echo ""
-        echo -e "${BOLD}  2. 复制 vscode-server workspace storage 到新发行版:${RESET}"
+        echo -e "${BOLD}  迁移 vscode-server workspace storage 到新发行版:${RESET}"
         echo -e "     ${DIM}旧:${RESET} ~/.vscode-server/data/User/workspaceStorage/${sel_hash}"
         echo -e "     ${DIM}新:${RESET} ~/.vscode-server/data/User/workspaceStorage/${new_hash}"
         echo ""
-        echo -e "${BOLD}  3. 复制 vscode-server 扩展（如尚未安装）:${RESET}"
-        echo -e "     ${DIM}旧:${RESET} ~/.vscode-server/extensions/"
-        echo -e "     ${DIM}新:${RESET} ~/.vscode-server/extensions/"
-        echo ""
         echo -e "${BOLD}  快速迁移命令:${RESET}"
-        # 使用 Windows 用户目录中转，避免 /mnt/c/ 根目录权限问题
-        local tmp_tar="/mnt/c/Users/\$(cmd.exe /c 'echo %USERNAME%' 2>/dev/null | tr -d '\\r\\n')/tmp-wsmigrate.tar.gz"
+        # 先 tar 到本地 /tmp 再 cp 到 Windows，避免 9P 直写慢
+        local win_tmp="/mnt/c/Users/${WIN_USER}/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
+        if [[ -z "$WIN_USER" ]]; then
+            echo -e "  ${RED}⚠ 未检测到 Windows 用户名，请手动替换命令中的 <WIN_USER>${RESET}"
+            win_tmp="/mnt/c/Users/<WIN_USER>/AppData/Local/Temp/tmp-wsmigrate.tar.gz"
+        fi
         echo -e "  ${DIM}# 在旧系统 (${old_distro_name}) 中执行:${RESET}"
-        echo -e "  ${CYAN}tar czf ${tmp_tar} -C ~/ \"${old_path_decoded#$HOME/}\" \".vscode-server/data/User/workspaceStorage/${sel_hash}\" \".vscode-server/extensions\"${RESET}"
+        echo -e "  ${CYAN}sudo tar czf /tmp/wsmigrate.tar.gz -C ~/ \".vscode-server/data/User/workspaceStorage/${sel_hash}\" && cp /tmp/wsmigrate.tar.gz ${win_tmp} && rm /tmp/wsmigrate.tar.gz${RESET}"
         echo ""
         echo -e "  ${DIM}# 在新系统 (${new_distro_name}) 中执行:${RESET}"
-        echo -e "  ${CYAN}tar xzf ${tmp_tar} -C ~/ && mv ~/.vscode-server/data/User/workspaceStorage/${sel_hash} ~/.vscode-server/data/User/workspaceStorage/${new_hash}; rm ${tmp_tar}${RESET}"
+        echo -e "  ${CYAN}cp ${win_tmp} /tmp/wsmigrate.tar.gz && sudo tar xzf /tmp/wsmigrate.tar.gz -C ~/ && mv ~/.vscode-server/data/User/workspaceStorage/${sel_hash} ~/.vscode-server/data/User/workspaceStorage/${new_hash}; rm /tmp/wsmigrate.tar.gz ${win_tmp}${RESET}"
         echo ""
         echo -e "  ${DIM}Windows 端 workspace storage 已自动迁移完成（Chat 历史等数据）${RESET}"
     else
