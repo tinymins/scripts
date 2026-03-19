@@ -1,0 +1,14 @@
+/$RECYCLE.BIN/
+/pagefile.sys
+/DumpStack.log
+/DumpStack.log.tmp
+/System Volume Information/
+/Wsl/
+/Developments/SeasunGame/111/
+/Developments/SeasunGame/client/
+/Developments/SeasunGame/client1/
+/Developments/SeasunGame/ui/
+/Developments/SeasunGame/JX3_DATA/userdata/zhcn_hd/fight_stat/
+/Users/root/.vscode/
+*.ffs_lock
+/**/node_modules/
