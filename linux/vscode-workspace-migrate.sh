@@ -539,7 +539,7 @@ do_migrate() {
     new_path_encoded=$(url_encode_path "$new_path")
     local new_uri
     if [[ "$sel_folder" == vscode-remote://* ]]; then
-        new_uri="vscode-remote://${new_authority}/${new_path_encoded}"
+        new_uri="vscode-remote://${new_authority}${new_path_encoded}"
     elif [[ "$sel_folder" == file://* ]]; then
         new_uri="file://${new_path_encoded}"
     else
