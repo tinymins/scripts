@@ -477,6 +477,24 @@ for line in sys.stdin:
         1) do_delete "$sel_hash" "$sel_folder" "$sel_ws_dir" ;;
     esac
 
+    # 操作后重新扫描，刷新列表
+    echo ""
+    echo -e "${DIM}正在刷新 workspace 列表...${RESET}"
+    ALL_HASHES=()
+    ALL_FOLDERS=()
+    ALL_SIZES=()
+    ALL_STORAGE_DIRS=()
+    ALL_MTIMES=()
+    for sd in "${storage_dirs[@]}"; do
+        scan_workspaces "$sd"
+        ALL_HASHES+=("${WORKSPACE_HASHES[@]}")
+        ALL_FOLDERS+=("${WORKSPACE_FOLDERS[@]}")
+        ALL_SIZES+=("${WORKSPACE_SIZES[@]}")
+        ALL_STORAGE_DIRS+=("${WORKSPACE_STORAGE_DIRS[@]}")
+        ALL_MTIMES+=("${WORKSPACE_MTIMES[@]}")
+    done
+    total=${#ALL_HASHES[@]}
+
     echo ""
     echo -e "${DIM}────────────────────────────────────────${RESET}"
     echo ""
