@@ -42,6 +42,8 @@ DEFAULT_PROFILE = {
     "preset": "p7",
 }
 
+VIDEO_EXTS = {".mp4", ".ts"}
+
 # ffmpeg 路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
@@ -130,10 +132,17 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
 
 
 class VideoInfo:
-    def __init__(self, datetime_obj=None, rest_of_filename=None, max_time_difference=None):
+    def __init__(
+        self,
+        datetime_obj=None,
+        rest_of_filename=None,
+        max_time_difference=None,
+        camera_key=None,
+    ):
         self.datetime = datetime_obj
         self.rest_of_filename = rest_of_filename
         self.max_time_difference = max_time_difference
+        self.camera_key = camera_key
 
 def parse_video_filename(filename):
     # 原有格式：20250419195801_000785AC.MP4
@@ -148,11 +157,11 @@ def parse_video_filename(filename):
         )
 
     # 新格式：NO20200101-001521-002110B.mp4
-    match = re.match(r"[A-Za-z]+(\d{8})-(\d{6})-(\d+[A-Za-z]+\.MP4)", filename, re.IGNORECASE)
+    match = re.match(r"[A-Za-z]+(\d{8})-(\d{6})-(\d+[A-Za-z]+\.(?:MP4|TS))", filename, re.IGNORECASE)
     if match:
         date_str = match.group(1)
         time_str = match.group(2)
-        rest_of_filename = match.group(3)
+        rest_of_filename = _mp4_name_for_transport_stream(match.group(3))
         datetime_str = date_str + time_str
         return VideoInfo(
             datetime_obj=datetime.strptime(datetime_str, "%Y%m%d%H%M%S"),
@@ -160,7 +169,44 @@ def parse_video_filename(filename):
             max_time_difference=200
         )
 
+    # LS_AR_IMX335: MOV2084_20260503165638.mp4 / LOK0051_20260318094443.mp4
+    # Prefixes such as MOV/LOK/LOCK only indicate protection state and must not
+    # split continuous clips.
+    match = re.match(r"[A-Za-z]*\d+_(\d{14})\.(?:MP4|TS)$", filename, re.IGNORECASE)
+    if match:
+        datetime_str = match.group(1)
+        return VideoInfo(
+            datetime_obj=datetime.strptime(datetime_str, "%Y%m%d%H%M%S"),
+            rest_of_filename="AR_IMX335.mp4",
+            max_time_difference=120,
+            camera_key="AR_IMX335",
+        )
+
+    # LS_S3: 20260503_15h10m04s.ts / 20260429_11h20m35s-2.ts
+    match = re.match(r"(\d{8})_(\d{2})h(\d{2})m(\d{2})s(?:-\d+)?\.(?:MP4|TS)$", filename, re.IGNORECASE)
+    if match:
+        datetime_str = "".join(match.groups())
+        return VideoInfo(
+            datetime_obj=datetime.strptime(datetime_str, "%Y%m%d%H%M%S"),
+            rest_of_filename="LS_S3.mp4",
+            max_time_difference=120,
+            camera_key="LS_S3",
+        )
+
     return VideoInfo()
+
+def _basename(path):
+    components = _path_components(path)
+    return components[-1] if components else os.path.basename(path)
+
+def _mp4_name_for_transport_stream(filename):
+    root, ext = os.path.splitext(filename)
+    if ext.lower() == ".ts":
+        return root + ".mp4"
+    return filename
+
+def _is_video_file(filename):
+    return os.path.splitext(filename)[1].lower() in VIDEO_EXTS
 
 def extract_camera_id(filename):
     # 原有格式：从 "20250419195801_000785AC.MP4" 提取 "AC"
@@ -175,25 +221,64 @@ def extract_camera_id(filename):
 
     return None
 
-def group_videos_by_camera(videos):
+def _path_components(path):
+    return [part for part in re.split(r"[\\/]+", path) if part]
+
+def _infer_device_key(path, src_folder=None):
+    components = _path_components(path)
+    for part in components:
+        if re.match(r"LS_[A-Za-z0-9_]+$", part, re.IGNORECASE):
+            return part.upper()
+
+    if src_folder:
+        try:
+            relative = os.path.relpath(path, src_folder)
+            relative_parts = _path_components(relative)
+            if len(relative_parts) > 1:
+                return relative_parts[0].upper()
+        except ValueError:
+            pass
+
+    parent = os.path.basename(os.path.dirname(path))
+    return parent.upper() if parent else "SINGLE_CAMERA"
+
+def extract_camera_key(video_path, src_folder=None):
+    basename = _basename(video_path)
+    camera_id = extract_camera_id(basename)
+    if camera_id:
+        return camera_id
+
+    info = parse_video_filename(basename)
+    if info.camera_key:
+        return f"{info.camera_key}:{_infer_device_key(video_path, src_folder)}"
+
+    return None
+
+def group_videos_by_camera(videos, src_folder=None):
     # 按照摄像机ID进行初始分组
     camera_groups = {}
     for video in videos:
-        basename = os.path.basename(video)
-        camera_id = extract_camera_id(basename)
-        if camera_id not in camera_groups:
-            camera_groups[camera_id] = []
-        camera_groups[camera_id].append(video)
+        camera_key = extract_camera_key(video, src_folder)
+        if camera_key not in camera_groups:
+            camera_groups[camera_key] = []
+        camera_groups[camera_key].append(video)
 
     # 返回所有分组
     return list(camera_groups.values())
+
+def _video_sort_key(path):
+    basename = _basename(path)
+    info = parse_video_filename(basename)
+    if info.datetime:
+        return (info.datetime, basename)
+    return (datetime.max, basename)
 
 def group_videos_by_time(video_camera_groups):
     final_groups = []
 
     # 对每个摄像机组内的视频按时间进行进一步分组
     for video_series in video_camera_groups:
-        video_series.sort(key=lambda x: os.path.basename(x))
+        video_series.sort(key=_video_sort_key)
         time_grouped = []
         current_group = []
 
@@ -202,8 +287,8 @@ def group_videos_by_time(video_camera_groups):
                 current_group.append(video)
                 continue
 
-            current_info = parse_video_filename(os.path.basename(video))
-            previous_info = parse_video_filename(os.path.basename(video_series[i - 1]))
+            current_info = parse_video_filename(_basename(video))
+            previous_info = parse_video_filename(_basename(video_series[i - 1]))
 
             if current_info.datetime and previous_info.datetime:
                 time_diff = (current_info.datetime - previous_info.datetime).total_seconds()
@@ -225,20 +310,50 @@ def check_file_exists(file_path):
 
 def create_combined_filename(first_video, last_video):
     """创建合并后的文件名，格式为：第一个视频时间_最后一个视频时间_其余部分.MP4"""
-    first_basename = os.path.basename(first_video)
-    last_basename = os.path.basename(last_video)
+    first_basename = _basename(first_video)
+    last_basename = _basename(last_video)
 
     first_info = parse_video_filename(first_basename)
     last_info = parse_video_filename(last_basename)
 
     if not first_info.datetime or not last_info.datetime:
-        return first_basename  # 如果无法提取时间，返回原始文件名
+        return _mp4_name_for_transport_stream(first_basename)  # 如果无法提取时间，返回原始文件名
 
     # 将datetime对象转换为字符串格式
     first_timestamp = first_info.datetime.strftime("%Y%m%d%H%M%S")
     last_timestamp = last_info.datetime.strftime("%Y%m%d%H%M%S")
 
-    return f"{first_timestamp}_{last_timestamp}_{first_info.rest_of_filename}"
+    return f"{first_timestamp}_{last_timestamp}_{_mp4_name_for_transport_stream(first_info.rest_of_filename)}"
+
+def _concat_file_line(video_path):
+    concat_path = os.path.abspath(video_path)
+    if os.name == "nt":
+        concat_path = concat_path.replace("\\", "/")
+    concat_path = concat_path.replace("'", "'\\''")
+    return f"file '{concat_path}'\n"
+
+def _write_concat_list(concat_list_path, video_group):
+    with open(concat_list_path, "w") as f:
+        for video in video_group:
+            f.write(_concat_file_line(video))
+
+def _copy_merge_videos(video_group, combined_file):
+    concat_list_path = combined_file + ".concat_list.txt"
+    _write_concat_list(concat_list_path, video_group)
+
+    try:
+        command = [
+            FFMPEG, "-y",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            combined_file,
+        ]
+        subprocess.run(command, check=True)
+    finally:
+        if os.path.exists(concat_list_path):
+            os.remove(concat_list_path)
 
 def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None):
     # 获取最后一个视频文件的时间属性
@@ -248,7 +363,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     last_mod_time = last_video_stats.st_mtime
 
     # 获取通道ID（从第一个视频文件名提取）
-    camera_id = extract_camera_id(os.path.basename(video_group[0]))
+    camera_id = extract_camera_id(_basename(video_group[0]))
 
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩：直接从源压缩到目标
@@ -258,25 +373,26 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             os.utime(combined_file, (last_access_time, last_mod_time))
             return in_sz, out_sz, elapsed
         else:
-            # 压缩失败时回退到直接复制
-            print("  Compression failed, falling back to copy...")
-            shutil.copy2(video_group[0], combined_file)
+            # 压缩失败时回退到无压缩输出；.ts 需要 remux 到 mp4，不能直接复制
+            print("  Compression failed, falling back to copy/remux...")
+            if os.path.splitext(video_group[0])[1].lower() == os.path.splitext(combined_file)[1].lower():
+                shutil.copy2(video_group[0], combined_file)
+            else:
+                _copy_merge_videos(video_group, combined_file)
             return 0, 0, 0
 
-    if len(video_group) == 1 and not enable_compress:
+    if len(video_group) == 1 and not enable_compress and os.path.splitext(video_group[0])[1].lower() == ".mp4":
         # 单文件 + 不压缩：直接复制
         print(f"Copying single file: {video_group[0]} to {combined_file}")
         shutil.copy2(video_group[0], combined_file)
         return 0, 0, 0
 
     print(f"Merging {len(video_group)} files into: {combined_file}")
-    print(f"Files to merge: {[os.path.basename(v) for v in video_group]}")
+    print(f"Files to merge: {[_basename(v) for v in video_group]}")
 
     # 写入 concat 列表
     concat_list_path = combined_file + ".concat_list.txt"
-    with open(concat_list_path, "w") as f:
-        for video in video_group:
-            f.write(f"file '{video}'\n")
+    _write_concat_list(concat_list_path, video_group)
 
     if enable_compress:
         # 合并+压缩一步完成：concat 直接输入到 hevc_nvenc
@@ -289,6 +405,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             FFMPEG,
             "-y",
             "-hwaccel", "cuda",
+            "-fflags", "+genpts",
             "-f", "concat", "-safe", "0", "-i", concat_list_path,
             "-c:v", "hevc_nvenc",
             "-preset", profile["preset"],
@@ -337,13 +454,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         os.utime(combined_file, (last_access_time, last_mod_time))
         return input_size, output_size, elapsed
     else:
-        # 不压缩：仅 stream copy 合并
-        command = [
-            FFMPEG, '-f', 'concat', '-safe', '0', '-i', concat_list_path,
-            '-c', 'copy', combined_file
-        ]
-        subprocess.run(command, check=True)
-        os.remove(concat_list_path)
+        # 不压缩：仅 stream copy 合并；.ts 也会 remux 到 .mp4 输出
+        _copy_merge_videos(video_group, combined_file)
         print("Merge complete.")
 
     # 设置合并后文件的时间属性为最后一个视频文件的时间属性
@@ -351,7 +463,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     return 0, 0, 0
 
 def process_videos_in_folder(src_folder, target_folder_base, enable_compress=False, cq_override=None):
-    mp4_files = []
+    video_files = []
     other_files = []
 
     # 优化扫描文件速度，使用os.scandir递归
@@ -365,19 +477,19 @@ def process_videos_in_folder(src_folder, target_folder_base, enable_compress=Fal
                 if entry.stat().st_size == 0:
                     print(f"Skipping 0B file: {entry.path}")
                     continue
-                if entry.name.lower().endswith('.mp4'):
-                    mp4_files.append(entry.path)
+                if _is_video_file(entry.name):
+                    video_files.append(entry.path)
                 else:
                     other_files.append(entry.path)
 
     scan_folder(src_folder)
-    print(f"Found {len(mp4_files)} MP4 files and {len(other_files)} other files.")
+    print(f"Found {len(video_files)} video files and {len(other_files)} other files.")
 
-    # 处理MP4文件
-    if mp4_files:
+    # 处理视频文件
+    if video_files:
         # 按照摄像机ID进行初始分组
-        camera_groups = group_videos_by_camera(mp4_files)
-        print(f"MP4 files divided into {len(camera_groups)} different camera groups.")
+        camera_groups = group_videos_by_camera(video_files, src_folder)
+        print(f"Video files divided into {len(camera_groups)} different camera groups.")
 
         # 进一步按照时间关系进行分组
         grouped_videos = group_videos_by_time(camera_groups)
