@@ -273,7 +273,7 @@ def _video_sort_key(path):
         return (info.datetime, basename)
     return (datetime.max, basename)
 
-def group_videos_by_time(video_camera_groups):
+def group_videos_by_time(video_camera_groups, max_gap_seconds=None):
     final_groups = []
 
     # 对每个摄像机组内的视频按时间进行进一步分组
@@ -292,7 +292,12 @@ def group_videos_by_time(video_camera_groups):
 
             if current_info.datetime and previous_info.datetime:
                 time_diff = (current_info.datetime - previous_info.datetime).total_seconds()
-                if time_diff <= current_info.max_time_difference:
+                max_time_difference = (
+                    max_gap_seconds
+                    if max_gap_seconds is not None
+                    else current_info.max_time_difference
+                )
+                if max_time_difference is not None and time_diff <= max_time_difference:
                     current_group.append(video)
                 else:
                     time_grouped.append(current_group)
@@ -462,7 +467,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     os.utime(combined_file, (last_access_time, last_mod_time))
     return 0, 0, 0
 
-def process_videos_in_folder(src_folder, target_folder_base, enable_compress=False, cq_override=None):
+def process_videos_in_folder(src_folder, target_folder_base, enable_compress=False, cq_override=None, max_gap_seconds=None):
     video_files = []
     other_files = []
 
@@ -492,7 +497,7 @@ def process_videos_in_folder(src_folder, target_folder_base, enable_compress=Fal
         print(f"Video files divided into {len(camera_groups)} different camera groups.")
 
         # 进一步按照时间关系进行分组
-        grouped_videos = group_videos_by_time(camera_groups)
+        grouped_videos = group_videos_by_time(camera_groups, max_gap_seconds)
         total_groups = len(grouped_videos)
         print(f"Total video groups to process: {total_groups}")
 
@@ -597,6 +602,7 @@ if __name__ == "__main__":
     parser.add_argument("--compress", action="store_true", help="合并后进行NVENC压缩")
     parser.add_argument("--no-compress", action="store_true", help="合并后不压缩")
     parser.add_argument("--cq", type=int, help="全局覆盖CQ值（默认按通道使用预设值）")
+    parser.add_argument("--max-gap-seconds", type=int, help="覆盖连续视频分组的最大时间间隔（秒）")
     args = parser.parse_args()
 
     src_folder = args.src
@@ -627,5 +633,5 @@ if __name__ == "__main__":
     else:
         print("Compression DISABLED")
 
-    process_videos_in_folder(src_folder, target_folder_base, enable_compress, args.cq)
+    process_videos_in_folder(src_folder, target_folder_base, enable_compress, args.cq, args.max_gap_seconds)
     os.system("pause")
