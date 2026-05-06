@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import re
@@ -7,7 +8,6 @@ import subprocess
 import time
 import traceback
 from datetime import datetime, timedelta
-
 
 # ============================================================
 # 压缩参数配置 - 测试确认后可修改此处
@@ -82,16 +82,221 @@ def format_size(size_bytes):
 
 
 class DurationResolver:
-    def __init__(self, enabled=True, fallback_seconds=None):
+    WINDOWS_METADATA_BATCH_SIZE = 500
+    DURATION_MATCH_TOLERANCE_SECONDS = 1.0
+
+    def __init__(
+        self,
+        enabled=True,
+        fallback_seconds=None,
+        use_windows_metadata=True,
+        adaptive_sampling=True,
+    ):
         self.enabled = enabled
         self.fallback_seconds = fallback_seconds
+        self.use_windows_metadata = use_windows_metadata
+        self.adaptive_sampling = adaptive_sampling
         self.cache = {}
+        self.cache_sources = {}
+        self.windows_metadata_attempted = False
+        self.stats = {
+            "windows_metadata_hits": 0,
+            "ffprobe_probes": 0,
+            "adaptive_reused": 0,
+            "unavailable": 0,
+        }
 
     def duration_for_file(self, path):
         cache_key = os.path.abspath(os.path.normpath(path))
         if cache_key not in self.cache:
-            self.cache[cache_key] = self._resolve_duration(path)
+            self._cache_duration(path, self._resolve_duration(path), "ffprobe")
         return self.cache[cache_key]
+
+    def prepare_series(self, video_series):
+        if not self.enabled:
+            return
+
+        candidates = []
+        for video in video_series:
+            info = parse_video_filename(_basename(video))
+            if info.datetime and not info.end_datetime:
+                candidates.append(video)
+
+        if not candidates:
+            return
+
+        before = self.stats.copy()
+        print(f"Resolving durations for {len(candidates)} clips...")
+
+        self._prefetch_windows_metadata(candidates)
+
+        if self.adaptive_sampling:
+            self._adaptive_fill(candidates, 0, len(candidates) - 1)
+
+        delta = {
+            key: self.stats[key] - before.get(key, 0)
+            for key in self.stats
+        }
+        print(
+            "Duration resolving summary: "
+            f"Windows metadata hits={delta['windows_metadata_hits']}, "
+            f"ffprobe probes={delta['ffprobe_probes']}, "
+            f"adaptive reused={delta['adaptive_reused']}, "
+            f"unavailable={delta['unavailable']}"
+        )
+
+    def _cache_key(self, path):
+        return os.path.abspath(os.path.normpath(path))
+
+    def _cache_duration(self, path, duration, source):
+        cache_key = self._cache_key(path)
+        self.cache[cache_key] = duration
+        self.cache_sources[cache_key] = source
+
+    def _has_cached_duration(self, path):
+        return self._cache_key(path) in self.cache
+
+    def _adaptive_fill(self, paths, start, end):
+        if start > end:
+            return
+
+        if start == end:
+            self.duration_for_file(paths[start])
+            return
+
+        first_duration = self.duration_for_file(paths[start])
+        last_duration = self.duration_for_file(paths[end])
+
+        if (
+            first_duration is not None
+            and last_duration is not None
+            and abs(first_duration - last_duration) <= self.DURATION_MATCH_TOLERANCE_SECONDS
+        ):
+            duration = (first_duration + last_duration) / 2
+            reused = 0
+            for path in paths[start:end + 1]:
+                if not self._has_cached_duration(path):
+                    self._cache_duration(path, duration, "adaptive")
+                    reused += 1
+            self.stats["adaptive_reused"] += reused
+            return
+
+        if end - start == 1:
+            return
+
+        mid = (start + end) // 2
+        self._adaptive_fill(paths, start, mid)
+        self._adaptive_fill(paths, mid + 1, end)
+
+    def _prefetch_windows_metadata(self, paths):
+        if not self._can_use_windows_metadata():
+            return
+
+        uncached_paths = [path for path in paths if not self._has_cached_duration(path)]
+        if not uncached_paths:
+            return
+
+        self.windows_metadata_attempted = True
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            print("Windows metadata duration lookup skipped: powershell.exe not found")
+            return
+
+        print(f"Trying Windows metadata duration lookup for {len(uncached_paths)} clips...")
+        for start in range(0, len(uncached_paths), self.WINDOWS_METADATA_BATCH_SIZE):
+            batch = uncached_paths[start:start + self.WINDOWS_METADATA_BATCH_SIZE]
+            durations = self._read_windows_metadata_batch(powershell, batch)
+            for path, duration in durations.items():
+                self._cache_duration(path, duration, "windows_metadata")
+                self.stats["windows_metadata_hits"] += 1
+            print(
+                f"  Windows metadata batch "
+                f"{start // self.WINDOWS_METADATA_BATCH_SIZE + 1}/"
+                f"{math.ceil(len(uncached_paths) / self.WINDOWS_METADATA_BATCH_SIZE)}: "
+                f"{len(durations)}/{len(batch)} durations found"
+            )
+
+    def _can_use_windows_metadata(self):
+        return self.enabled and self.use_windows_metadata and os.name == "nt"
+
+    def _read_windows_metadata_batch(self, powershell, paths):
+        script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$shell = New-Object -ComObject Shell.Application
+$folders = @{}
+$result = @{}
+foreach ($path in $paths) {
+    $folderPath = [System.IO.Path]::GetDirectoryName($path)
+    $fileName = [System.IO.Path]::GetFileName($path)
+    if (-not $folders.ContainsKey($folderPath)) {
+        $folders[$folderPath] = $shell.Namespace($folderPath)
+    }
+    $folder = $folders[$folderPath]
+    if ($null -eq $folder) { continue }
+    $item = $folder.ParseName($fileName)
+    if ($null -eq $item) { continue }
+    $duration = $item.ExtendedProperty('System.Media.Duration')
+    if ($null -eq $duration) { continue }
+    try {
+        $seconds = [double]$duration / 10000000.0
+        if ($seconds -gt 0) {
+            $result[$path] = $seconds
+        }
+    } catch {
+        continue
+    }
+}
+$result | ConvertTo-Json -Compress
+"""
+        try:
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                input=json.dumps(paths),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"  Windows metadata duration lookup failed: {exc}")
+            return {}
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"exit code {result.returncode}"
+            print(f"  Windows metadata duration lookup failed: {detail}")
+            return {}
+
+        output = result.stdout.strip()
+        if not output:
+            return {}
+
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError as exc:
+            print(f"  Windows metadata duration lookup returned invalid JSON: {exc}")
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        durations = {}
+        for path, duration in parsed.items():
+            try:
+                duration_float = float(duration)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(duration_float) and duration_float > 0:
+                durations[path] = duration_float
+        return durations
 
     def _resolve_duration(self, path):
         basename = _basename(path)
@@ -113,6 +318,7 @@ class DurationResolver:
             path,
         ]
         try:
+            self.stats["ffprobe_probes"] += 1
             result = subprocess.run(
                 command,
                 capture_output=True,
@@ -146,6 +352,7 @@ class DurationResolver:
             print(f"WARNING: {reason} for {basename}; duration unavailable")
         else:
             print(f"ERROR: {reason} for {basename}; duration unavailable")
+        self.stats["unavailable"] += 1
         return None
 
 
@@ -399,8 +606,14 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None, duration_res
     final_groups = []
 
     # 对每个摄像机组内的视频按时间进行进一步分组
-    for video_series in video_camera_groups:
+    for series_index, video_series in enumerate(video_camera_groups, start=1):
+        print(
+            f"Grouping camera series {series_index}/{len(video_camera_groups)} "
+            f"({len(video_series)} files)..."
+        )
         video_series.sort(key=_video_sort_key)
+        if duration_resolver:
+            duration_resolver.prepare_series(video_series)
         time_grouped = []
         current_group = []
 
@@ -756,7 +969,21 @@ def main():
         type=int,
         help="ffprobe 不可用/失败或禁用时使用的显式兜底片段时长（秒）；未提供则不猜测时长",
     )
-    parser.add_argument("--no-ffprobe-duration", action="store_true", help="禁用 ffprobe 时长探测，只使用 --clip-duration-seconds 兜底")
+    parser.add_argument(
+        "--no-ffprobe-duration",
+        action="store_true",
+        help="禁用时长探测（Windows 元数据/ffprobe），只使用 --clip-duration-seconds 兜底",
+    )
+    parser.add_argument(
+        "--no-windows-metadata-duration",
+        action="store_true",
+        help="禁用 Windows Shell 元数据快速读取，直接使用 ffprobe/自适应 ffprobe",
+    )
+    parser.add_argument(
+        "--exact-duration-probing",
+        action="store_true",
+        help="禁用自适应抽样；需要时对每个视频精确探测时长（会更慢）",
+    )
     parser.add_argument("--allow-combined-input", action="store_true", help="允许从路径包含 _Combined 的目录读取")
     args = parser.parse_args()
 
@@ -798,6 +1025,8 @@ def main():
     duration_resolver = DurationResolver(
         enabled=not args.no_ffprobe_duration,
         fallback_seconds=args.clip_duration_seconds,
+        use_windows_metadata=not args.no_windows_metadata_duration,
+        adaptive_sampling=not args.exact_duration_probing,
     )
 
     process_videos_in_folder(
