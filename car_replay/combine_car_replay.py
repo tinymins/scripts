@@ -750,6 +750,7 @@ if __name__ == "__main__":
     src_folder = args.src
     if not src_folder:
         src_folder = input("Please enter the source folder path: ").strip().strip('"')
+    src_folder = src_folder.rstrip("\\/")
 
     if _contains_combined_path(src_folder) and not args.allow_combined_input:
         raise SystemExit(
