@@ -5,7 +5,9 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 from datetime import datetime, timedelta
+
 
 # ============================================================
 # 压缩参数配置 - 测试确认后可修改此处
@@ -49,6 +51,17 @@ VIDEO_EXTS = {".mp4", ".ts"}
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
 FFPROBE = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffprobe.exe")
+
+
+def _pause_before_exit():
+    if os.name == "nt":
+        os.system("pause")
+        return
+
+    try:
+        input("Press Enter to exit...")
+    except EOFError:
+        pass
 
 
 def get_compress_profile(camera_id, cq_override=None):
@@ -725,7 +738,7 @@ def process_videos_in_folder(
 
     print("\nAll processing completed successfully!")
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description=(
             "行车记录仪视频合并（可选压缩）。源片段结束时间优先使用文件名中的显式结束时间；"
@@ -795,4 +808,26 @@ if __name__ == "__main__":
         args.max_gap_seconds,
         duration_resolver,
     )
-    os.system("pause")
+    _pause_before_exit()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit as exc:
+        code = exc.code
+        is_error = isinstance(code, str) or code not in (None, 0)
+        if is_error:
+            if isinstance(code, str) and code:
+                print(f"ERROR: {code}")
+            _pause_before_exit()
+        raise
+    except KeyboardInterrupt:
+        print("\nCancelled by user.")
+        _pause_before_exit()
+        raise SystemExit(130)
+    except Exception:
+        print("\nFATAL ERROR: An unexpected error occurred.")
+        traceback.print_exc()
+        _pause_before_exit()
+        raise SystemExit(1)
