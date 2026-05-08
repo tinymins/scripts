@@ -78,5 +78,53 @@ class DurationResolverTests(unittest.TestCase):
         self.assertLess(len(resolver.ffprobe_calls), len(videos))
 
 
+class WarningTrackerTests(unittest.TestCase):
+    def test_clean_run_is_ok(self):
+        t = replay.WarningTracker()
+        t.feed("frame=  100 fps= 30 q=28.0 size=    1024kB time=00:00:03.33 bitrate=2517kbits/s")
+        t.feed("[hevc_nvenc @ 0x1] using NVENC capabilities")
+        self.assertEqual(t.severity(), "OK")
+        self.assertEqual(t.total_warnings, 0)
+
+    def test_a_single_corrupt_frame_is_suspicious(self):
+        t = replay.WarningTracker()
+        t.feed("[h264 @ 0xabc] corrupt decoded frame in stream 0")
+        self.assertEqual(t.severity(), "SUSPICIOUS")
+        self.assertEqual(t.counts["corrupt_frame"], 1)
+
+    def test_few_invalid_dts_are_warn_not_suspicious(self):
+        t = replay.WarningTracker()
+        for _ in range(7):
+            t.feed("[mov @ 0x1] Invalid DTS: 100 PTS: 99, replacing by guess")
+        self.assertEqual(t.severity(), "WARN")
+        self.assertEqual(t.counts["invalid_dts"], 7)
+
+    def test_many_invalid_dts_become_suspicious(self):
+        t = replay.WarningTracker()
+        for _ in range(20):
+            t.feed("[mov @ 0x1] Invalid DTS: 100 PTS: 99, replacing by guess")
+        self.assertEqual(t.severity(), "SUSPICIOUS")
+
+    def test_each_line_only_classified_once(self):
+        t = replay.WarningTracker()
+        # 同时含 "Invalid DTS" 和 "replacing by guess"，应只算 invalid_dts 一次
+        t.feed("[mov @ 0x1] Invalid DTS: 100 PTS: 99, replacing by guess")
+        self.assertEqual(t.counts["invalid_dts"], 1)
+        self.assertEqual(t.counts["guess_pts"], 0)
+        self.assertEqual(t.total_warnings, 1)
+
+    def test_oneline_summary_lists_categories(self):
+        t = replay.WarningTracker()
+        t.feed("[h264 @ 0x1] error while decoding MB 1 2")
+        t.feed("[h264 @ 0x2] concealing 1234 DC, 0 AC")
+        t.feed("[h264 @ 0x3] concealing 999 DC")
+        summary = t.format_oneline()
+        self.assertIn("decode_error=1", summary)
+        self.assertIn("concealing=2", summary)
+
+
+
+
+
 if __name__ == "__main__":
     unittest.main()
