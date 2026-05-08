@@ -34,10 +34,10 @@ def _video_sort_key(path):
     return (datetime.max, basename)
 
 
-def group_videos_by_time(video_camera_groups, max_gap_seconds=None, duration_resolver=None):
+def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
+                         duration_resolver=None, *, broken_split=True):
     final_groups = []
 
-    # 对每个摄像机组内的视频按时间进行进一步分组
     for series_index, video_series in enumerate(video_camera_groups, start=1):
         print(
             f"Grouping camera series {series_index}/{len(video_camera_groups)} "
@@ -46,42 +46,64 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None, duration_res
         video_series.sort(key=_video_sort_key)
         if duration_resolver:
             duration_resolver.prepare_series(video_series)
+
         time_grouped = []
         current_group = []
+        prev_video = None
+        prev_info = None
+        broken_files = []
 
-        for i, video in enumerate(video_series):
-            if i == 0:
-                current_group.append(video)
-                continue
+        for video in video_series:
+            if broken_split and duration_resolver is not None:
+                try:
+                    is_broken = duration_resolver.is_broken(video)
+                except RuntimeError:
+                    is_broken = False
+                if is_broken:
+                    broken_files.append(video)
+                    if current_group:
+                        time_grouped.append(current_group)
+                        current_group = []
+                    prev_video = None
+                    prev_info = None
+                    continue
 
             current_info = parse_video_filename(_basename(video))
-            previous_info = parse_video_filename(_basename(video_series[i - 1]))
-
-            previous_video = video_series[i - 1]
-            previous_effective_end = _effective_end(
-                previous_info,
-                previous_video,
-                duration_resolver,
-            )
-            if not current_info.datetime or not previous_effective_end:
-                time_grouped.append(current_group)
+            if prev_video is None:
                 current_group = [video]
-                continue
-
-            time_diff = (current_info.datetime - previous_effective_end).total_seconds()
-            max_time_difference = (
-                max_gap_seconds
-                if max_gap_seconds is not None
-                else current_info.max_time_difference
-            )
-            if max_time_difference is not None and time_diff <= max_time_difference:
-                current_group.append(video)
             else:
-                time_grouped.append(current_group)
-                current_group = [video]
+                previous_effective_end = _effective_end(
+                    prev_info, prev_video, duration_resolver,
+                )
+                if not current_info.datetime or not previous_effective_end:
+                    time_grouped.append(current_group)
+                    current_group = [video]
+                else:
+                    time_diff = (
+                        current_info.datetime - previous_effective_end
+                    ).total_seconds()
+                    max_time_difference = (
+                        max_gap_seconds
+                        if max_gap_seconds is not None
+                        else current_info.max_time_difference
+                    )
+                    if (max_time_difference is not None
+                            and time_diff <= max_time_difference):
+                        current_group.append(video)
+                    else:
+                        time_grouped.append(current_group)
+                        current_group = [video]
+            prev_video = video
+            prev_info = current_info
 
         if current_group:
             time_grouped.append(current_group)
+
+        if broken_files:
+            print(
+                f"  ⛔ 已剔除 {len(broken_files)} 个 broken 文件作为分组断点："
+                f"e.g. {_basename(broken_files[0])}"
+            )
 
         final_groups.extend(time_grouped)
 

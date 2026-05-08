@@ -27,6 +27,7 @@ def process_videos_in_folder(
     cq_override=None,
     max_gap_seconds=None,
     duration_resolver=None,
+    broken_split=True,
 ):
     video_files = []
     other_files = []
@@ -57,7 +58,10 @@ def process_videos_in_folder(
         print(f"Video files divided into {len(camera_groups)} different camera groups.")
 
         # 进一步按照时间关系进行分组
-        grouped_videos = group_videos_by_time(camera_groups, max_gap_seconds, duration_resolver)
+        grouped_videos = group_videos_by_time(
+            camera_groups, max_gap_seconds, duration_resolver,
+            broken_split=broken_split,
+        )
         total_groups = len(grouped_videos)
         print(f"Total video groups to process: {total_groups}")
 

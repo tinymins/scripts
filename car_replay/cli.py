@@ -165,5 +165,6 @@ def main():
         args.cq,
         args.max_gap_seconds,
         duration_resolver,
+        broken_split=not args.no_broken_split,
     )
     _pause_before_exit()
