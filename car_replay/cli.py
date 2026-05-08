@@ -61,6 +61,34 @@ def main():
         help="禁用混合模式（不预扫输入健康度，启用 --compress 时坏输入也强制走 NVENC）",
     )
     parser.add_argument("--allow-combined-input", action="store_true", help="允许从路径包含 _Combined 的目录读取")
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="时长/健康缓存目录（默认 <src>/.car_replay_cache）",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="禁用磁盘缓存（每次重新 probe，调试用）",
+    )
+    parser.add_argument(
+        "--probe-workers",
+        type=int,
+        default=4,
+        help="ffprobe 并发线程数（默认 4）",
+    )
+    parser.add_argument(
+        "--probe-timeout",
+        type=float,
+        default=60.0,
+        help="单文件 ffprobe 超时秒数（默认 60）",
+    )
+    parser.add_argument(
+        "--no-broken-split",
+        action="store_true",
+        help="跳过整体损坏文件健康探测（快速但可能漏识别坏文件）",
+    )
     args = parser.parse_args()
 
     if args.no_windows_metadata_duration:
@@ -111,10 +139,20 @@ def main():
     else:
         print("Compression DISABLED")
 
+    if args.cache_dir:
+        cache_path = os.path.join(args.cache_dir, "cache.json")
+    else:
+        cache_path = os.path.join(src_folder, ".car_replay_cache", "cache.json")
+
     duration_resolver = DurationResolver(
         enabled=not args.no_ffprobe_duration,
         fallback_seconds=args.clip_duration_seconds,
         track_health=enable_compress and not args.no_hybrid,
+        cache_path=cache_path,
+        use_cache=not args.no_cache,
+        probe_workers=args.probe_workers,
+        probe_timeout=args.probe_timeout,
+        with_health=not args.no_broken_split,
     )
 
     if duration_resolver.track_health:

@@ -1,170 +1,339 @@
-"""时长解析：DurationResolver 及 _effective_end。"""
+"""时长解析 + 健康探测：DurationResolver + DurationCache + _effective_end。
+
+duration 与 broken 路径分离（plan §1）；JSON 持久化缓存按 (size, mtime_ns, ctime_ns) 失效；
+ffprobe 调用统一走 `_run_ffprobe`（含 timeout）。
+"""
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Tuple
 
 from .config import FFPROBE
 from .naming import _basename, parse_video_filename
 
 
-class DurationResolver:
-    HEALTH_BAD_PATTERNS = (
-        "Invalid DTS",
-        "Invalid PTS",
-        "corrupt frame",
-        "corrupt decoded frame",
-        "non-existing PPS",
-        "missing reference",
-        "Could not find ref",
-        "application_invalid",
-    )
+def _run_ffprobe(path, timeout: float = 60.0) -> Tuple[Optional[float], bool]:
+    """跑一次 ffprobe 取 format.duration。
 
+    Returns (duration_or_None, broken_bool)。失败 / 非零返回码 / 解析失败 / 超时 / OSError → broken=True。
+    """
+    if not os.path.exists(FFPROBE):
+        return (None, True)
+    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return (None, True)
+    if r.returncode != 0:
+        return (None, True)
+    raw = (r.stdout or "").strip()
+    try:
+        duration = float(raw)
+    except ValueError:
+        return (None, True)
+    if not math.isfinite(duration) or duration <= 0:
+        return (None, True)
+    return (duration, False)
+
+
+def _cache_key(path) -> str:
+    """归一化路径作 key（处理 Windows 盘符大小写、UNC、WSL）。"""
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+
+def _stat_fingerprint(path) -> Optional[Tuple[int, int, int]]:
+    try:
+        st = os.stat(str(path))
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+class DurationCache:
+    """JSON 持久化缓存。entry 包含 size/mtime_ns/ctime_ns + duration/duration_source + health。"""
+
+    def __init__(self, cache_path: Optional[Path], enabled: bool = True):
+        self.cache_path: Optional[Path] = Path(cache_path) if cache_path else None
+        self.enabled = enabled and self.cache_path is not None
+        self._entries: Dict[str, dict] = {}
+        if self.enabled:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.cache_path or not self.cache_path.exists():
+            return
+        try:
+            with self.cache_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._entries = {k: v for k, v in data.items() if isinstance(v, dict)}
+        except (OSError, ValueError, json.JSONDecodeError):
+            self._entries = {}
+
+    def save(self) -> None:
+        if not self.enabled or not self.cache_path:
+            return
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(self._entries, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(str(tmp), str(self.cache_path))
+        except OSError as exc:
+            print(f"WARNING: 无法写入时长缓存 {self.cache_path}: {exc}")
+
+    def get_valid_entry(self, path) -> Optional[dict]:
+        """stat 匹配返回 entry；不匹配 / 不存在 → None。"""
+        if not self.enabled:
+            return None
+        entry = self._entries.get(_cache_key(path))
+        if not entry:
+            return None
+        fp = _stat_fingerprint(path)
+        if fp is None:
+            return None
+        if (entry.get("size"), entry.get("mtime_ns"), entry.get("ctime_ns")) != fp:
+            return None
+        return entry
+
+    def _entry_with_stat(self, path) -> Optional[dict]:
+        fp = _stat_fingerprint(path)
+        if fp is None:
+            return None
+        key = _cache_key(path)
+        entry = self._entries.get(key)
+        if not entry or (entry.get("size"), entry.get("mtime_ns"), entry.get("ctime_ns")) != fp:
+            entry = {"size": fp[0], "mtime_ns": fp[1], "ctime_ns": fp[2],
+                     "duration": None, "duration_source": None, "health": None}
+            self._entries[key] = entry
+        return entry
+
+    def put_duration(self, path, duration: Optional[float], source: Optional[str]) -> None:
+        if not self.enabled:
+            return
+        entry = self._entry_with_stat(path)
+        if entry is not None:
+            entry["duration"] = duration
+            entry["duration_source"] = source
+
+    def put_health(self, path, broken: bool) -> None:
+        if not self.enabled:
+            return
+        entry = self._entry_with_stat(path)
+        if entry is not None:
+            entry["health"] = {"broken": bool(broken), "probed_at": time.time()}
+
+
+class DurationResolver:
     def __init__(
-        self,
-        enabled=True,
-        fallback_seconds=None,
-        track_health=False,
+        self, enabled: bool = True, fallback_seconds: Optional[float] = None,
+        track_health: bool = False, cache_path: Optional[Path] = None,
+        use_cache: bool = True, probe_workers: int = 4,
+        probe_timeout: float = 60.0, with_health: bool = True,
     ):
         self.enabled = enabled
         self.fallback_seconds = fallback_seconds
         self.track_health = track_health
-        self.cache = {}
-        self.cache_sources = {}
-        self.health_cache = {}
-        self.stats = {
-            "ffprobe_probes": 0,
-            "unavailable": 0,
-            "unhealthy": 0,
-        }
+        self.probe_workers = max(1, int(probe_workers))
+        self.probe_timeout = float(probe_timeout)
+        self.with_health = bool(with_health)
+        self.cache = DurationCache(cache_path, enabled=use_cache)
+        self._mem_duration: Dict[str, Optional[float]] = {}
+        self._mem_source: Dict[str, Optional[str]] = {}
+        self._mem_broken: Dict[str, bool] = {}
+        self.stats = {"ffprobe_probes": 0, "cache_hits": 0, "filename_hits": 0,
+                      "unavailable": 0, "broken": 0}
 
-    def duration_for_file(self, path):
-        cache_key = os.path.abspath(os.path.normpath(path))
-        if cache_key not in self.cache:
-            self._cache_duration(path, self._resolve_duration(path), "ffprobe")
-        return self.cache[cache_key]
-
-    def prepare_series(self, video_series):
+    # ---- 公共接口 ----
+    def duration_for_file(self, path) -> Optional[float]:
+        key = _cache_key(path)
+        if key in self._mem_duration:
+            return self._mem_duration[key]
+        cached = self.cache.get_valid_entry(path)
+        if cached is not None and cached.get("duration_source") in ("filename", "ffprobe"):
+            duration = cached.get("duration")
+            self._mem_duration[key] = duration
+            self._mem_source[key] = cached.get("duration_source")
+            health = cached.get("health")
+            if isinstance(health, dict):
+                self._mem_broken[key] = bool(health.get("broken"))
+            self.stats["cache_hits"] += 1
+            return duration
+        # filename fast-path
+        info = parse_video_filename(_basename(path))
+        if info.datetime and info.end_datetime:
+            duration = (info.end_datetime - info.datetime).total_seconds()
+            if duration > 0:
+                self._record_duration(path, duration, "filename")
+                self.stats["filename_hits"] += 1
+                return duration
+        # ffprobe
         if not self.enabled:
+            return self._record_unavailable(path, "ffprobe duration probing disabled")
+        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
+        self.stats["ffprobe_probes"] += 1
+        if broken:
+            self._record_broken(path)
+            return self._record_unavailable(path, "ffprobe failed")
+        self._record_duration(path, duration, "ffprobe")
+        return duration
+
+    def prepare_series(self, video_series: Iterable[str], *, with_health: Optional[bool] = None) -> None:
+        """两遍并发解析：① duration ② 可选 health。"""
+        if with_health is None:
+            with_health = self.with_health
+        videos = list(video_series)
+        if not videos:
             return
 
-        candidates = []
-        for video in video_series:
+        # 第一遍 duration
+        pending_duration = []
+        for video in videos:
+            key = _cache_key(video)
+            if key in self._mem_duration:
+                continue
+            cached = self.cache.get_valid_entry(video)
+            if cached is not None and cached.get("duration_source") in ("filename", "ffprobe"):
+                self._mem_duration[key] = cached.get("duration")
+                self._mem_source[key] = cached.get("duration_source")
+                health = cached.get("health")
+                if isinstance(health, dict):
+                    self._mem_broken[key] = bool(health.get("broken"))
+                self.stats["cache_hits"] += 1
+                continue
             info = parse_video_filename(_basename(video))
-            if info.datetime and not info.end_datetime:
-                candidates.append(video)
+            if info.datetime and info.end_datetime:
+                duration = (info.end_datetime - info.datetime).total_seconds()
+                if duration > 0:
+                    self._record_duration(video, duration, "filename")
+                    self.stats["filename_hits"] += 1
+                    continue
+            pending_duration.append(video)
 
-        if not candidates:
-            return
+        if pending_duration:
+            if self.enabled:
+                print(f"📐 解析时长（ffprobe）: {len(pending_duration)} 个文件")
+                self._run_parallel(pending_duration, self._probe_duration_worker)
+            else:
+                for v in pending_duration:
+                    self._record_unavailable(v, "ffprobe duration probing disabled")
 
-        before = self.stats.copy()
-        print(f"Resolving durations for {len(candidates)} clips...")
+        # 第二遍 health
+        if with_health:
+            pending_health = []
+            for video in videos:
+                key = _cache_key(video)
+                if key in self._mem_broken:
+                    continue
+                cached = self.cache.get_valid_entry(video)
+                if cached is not None and isinstance(cached.get("health"), dict):
+                    self._mem_broken[key] = bool(cached["health"].get("broken"))
+                    continue
+                pending_health.append(video)
+            if pending_health:
+                print(f"🩺 健康探测: {len(pending_health)} 个文件")
+                self._run_parallel(pending_health, self._probe_health_worker)
 
-        delta = {
-            key: self.stats[key] - before.get(key, 0)
-            for key in self.stats
-        }
+        self.cache.save()
         print(
-            "Duration resolving summary: "
-            f"ffprobe probes={delta['ffprobe_probes']}, "
-            f"unavailable={delta['unavailable']}, "
-            f"unhealthy={delta['unhealthy']}"
+            f"📊 时长/健康解析汇总: cache={self.stats['cache_hits']}, "
+            f"filename={self.stats['filename_hits']}, ffprobe={self.stats['ffprobe_probes']}, "
+            f"broken={self.stats['broken']}, unavailable={self.stats['unavailable']}"
         )
 
-    def _cache_key(self, path):
-        return os.path.abspath(os.path.normpath(path))
+    def ensure_health_probed(self, path) -> None:
+        key = _cache_key(path)
+        if key in self._mem_broken:
+            return
+        cached = self.cache.get_valid_entry(path)
+        if cached is not None and isinstance(cached.get("health"), dict):
+            self._mem_broken[key] = bool(cached["health"].get("broken"))
+            return
+        self._probe_health_worker(path)
 
-    def _cache_duration(self, path, duration, source):
-        cache_key = self._cache_key(path)
-        self.cache[cache_key] = duration
-        self.cache_sources[cache_key] = source
-
-    def _has_cached_duration(self, path):
-        return self._cache_key(path) in self.cache
+    def is_broken(self, path) -> bool:
+        """要求先 ensure_health_probed；未知绝不当 False。"""
+        key = _cache_key(path)
+        if key not in self._mem_broken:
+            raise RuntimeError(
+                f"path not health-probed yet: {path!r}; call ensure_health_probed() first"
+            )
+        return self._mem_broken[key]
 
     def is_healthy(self, path):
-        """返回 True / False / None（None = 未检测）。"""
-        return self.health_cache.get(self._cache_key(path))
+        """向后兼容：True / False / None（None = 未检测）。"""
+        key = _cache_key(path)
+        if key in self._mem_broken:
+            return not self._mem_broken[key]
+        return None
 
-    def _resolve_duration(self, path):
-        basename = _basename(path)
-        if not self.enabled:
-            return self._fallback(
-                basename,
-                "ffprobe duration probing disabled",
-                warn_without_fallback=True,
-            )
+    # ---- 内部 ----
+    def _run_parallel(self, items, worker) -> None:
+        if self.probe_workers <= 1 or len(items) == 1:
+            for item in items:
+                worker(item)
+            return
+        with ThreadPoolExecutor(max_workers=self.probe_workers) as pool:
+            list(pool.map(worker, items))
 
+    def _probe_duration_worker(self, path) -> None:
         if not os.path.exists(FFPROBE):
-            return self._fallback(basename, f"ffprobe not found: {FFPROBE}")
+            self._record_unavailable(path, f"ffprobe not found: {FFPROBE}")
+            return
+        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
+        self.stats["ffprobe_probes"] += 1
+        if broken:
+            self._record_broken(path)
+            self._record_unavailable(path, "ffprobe failed")
+            return
+        self._record_duration(path, duration, "ffprobe")
 
-        verbosity = "warning" if self.track_health else "error"
-        command = [
-            FFPROBE,
-            "-v", verbosity,
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            path,
-        ]
-        try:
-            self.stats["ffprobe_probes"] += 1
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError as exc:
-            return self._fallback(basename, f"ffprobe failed: {exc}")
+    def _probe_health_worker(self, path) -> None:
+        if not os.path.exists(FFPROBE):
+            self._record_broken(path)
+            return
+        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
+        if broken:
+            self._record_broken(path)
+            return
+        key = _cache_key(path)
+        if key not in self._mem_duration and duration is not None:
+            self._record_duration(path, duration, "ffprobe")
+        self._mem_broken[key] = False
+        self.cache.put_health(path, broken=False)
 
-        if self.track_health:
-            stderr_text = result.stderr or ""
-            healthy = not any(pat in stderr_text for pat in self.HEALTH_BAD_PATTERNS)
-            self.health_cache[self._cache_key(path)] = healthy
-            if not healthy:
-                self.stats["unhealthy"] += 1
-                first_match = next(
-                    (pat for pat in self.HEALTH_BAD_PATTERNS if pat in stderr_text),
-                    "?",
-                )
-                print(f"  Unhealthy input detected ({first_match}): {basename}")
+    def _record_duration(self, path, duration: Optional[float], source: Optional[str]) -> None:
+        key = _cache_key(path)
+        self._mem_duration[key] = duration
+        self._mem_source[key] = source
+        self.cache.put_duration(path, duration, source)
 
-        if result.returncode != 0:
-            detail = (result.stderr or "").strip() or f"exit code {result.returncode}"
-            # track_health 模式下 stdout 仍可能含有有效时长，先尝试解析。
-            stdout_value = (result.stdout or "").strip()
-            try:
-                duration = float(stdout_value)
-                if math.isfinite(duration) and duration > 0:
-                    return duration
-            except ValueError:
-                pass
-            return self._fallback(basename, f"ffprobe failed: {detail}")
+    def _record_broken(self, path) -> None:
+        key = _cache_key(path)
+        if not self._mem_broken.get(key):
+            self.stats["broken"] += 1
+            print(f"  ⚠ broken 文件（ffprobe 失败/超时）: {_basename(path)}")
+        self._mem_broken[key] = True
+        self.cache.put_health(path, broken=True)
 
-        try:
-            duration = float(result.stdout.strip())
-        except ValueError:
-            return self._fallback(basename, f"invalid ffprobe duration: {result.stdout.strip()!r}")
-
-        if math.isfinite(duration) and duration > 0:
-            return duration
-        return self._fallback(basename, f"invalid ffprobe duration: {duration!r}")
-
-    def _fallback(self, basename, reason, warn_without_fallback=False):
+    def _record_unavailable(self, path, reason: str) -> Optional[float]:
+        basename = _basename(path)
         if self.fallback_seconds is not None:
-            print(
-                f"WARNING: {reason} for {basename}; "
-                f"using fallback duration {self.fallback_seconds}s"
-            )
+            print(f"WARNING: {reason} for {basename}; using fallback duration {self.fallback_seconds}s")
+            self._record_duration(path, self.fallback_seconds, "ffprobe")
             return self.fallback_seconds
-        if warn_without_fallback:
-            print(f"WARNING: {reason} for {basename}; duration unavailable")
-        else:
-            print(f"ERROR: {reason} for {basename}; duration unavailable")
+        print(f"ERROR: {reason} for {basename}; duration unavailable")
         self.stats["unavailable"] += 1
+        self._record_duration(path, None, None)
         return None
 
 
@@ -177,8 +346,4 @@ def _effective_end(info, video_path=None, duration_resolver=None):
         duration_seconds = duration_resolver.duration_for_file(video_path)
         if duration_seconds is not None:
             return info.datetime + timedelta(seconds=duration_seconds)
-    else:
-        duration_seconds = None
-    if duration_seconds is not None:
-        return info.datetime + timedelta(seconds=duration_seconds)
     return None
