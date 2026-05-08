@@ -97,7 +97,18 @@ def process_videos_in_folder(
             print(f"Group contains {len(group)} files")
 
             if not check_file_exists(combined_file_path):
-                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override, warning_collector=warning_collector, duration_resolver=duration_resolver)
+                try:
+                    in_sz, out_sz, elapsed = merge_videos(
+                        group, combined_file_path, enable_compress, cq_override,
+                        warning_collector=warning_collector,
+                        duration_resolver=duration_resolver,
+                    )
+                except Exception as exc:  # 单组兜底，不影响后续组
+                    import traceback
+                    print(f"  ❌ 处理该组时抛出异常: {exc}")
+                    traceback.print_exc()
+                    failed_groups += 1
+                    continue
                 total_input_size += in_sz
                 total_output_size += out_sz
                 total_elapsed += elapsed
