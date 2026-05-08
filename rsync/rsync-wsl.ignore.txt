@@ -1,1 +1,16 @@
-/Ubuntu-2004-WSL1/vfs/
+.cache/
+.local/share/Trash/
+.local/share/Steam/
+.npm/_cacache/
+.cargo/registry/
+.rustup/toolchains/
+.vscode-server/
+.cursor-server/
+node_modules/
+__pycache__/
+*.pyc
+.docker/
+snap/
+.minikube/
+.gradle/cache/
+.m2/repository/
