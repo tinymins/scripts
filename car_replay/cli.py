@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 from .duration import DurationResolver
 from .naming import _contains_combined_path
@@ -47,12 +48,12 @@ def main():
     parser.add_argument(
         "--no-windows-metadata-duration",
         action="store_true",
-        help="禁用 Windows Shell 元数据快速读取，直接使用 ffprobe/自适应 ffprobe",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--exact-duration-probing",
         action="store_true",
-        help="禁用自适应抽样；需要时对每个视频精确探测时长（会更慢）",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--no-hybrid",
@@ -61,6 +62,19 @@ def main():
     )
     parser.add_argument("--allow-combined-input", action="store_true", help="允许从路径包含 _Combined 的目录读取")
     args = parser.parse_args()
+
+    if args.no_windows_metadata_duration:
+        print(
+            "[deprecated] --no-windows-metadata-duration is now a no-op "
+            "(Windows shell metadata path removed)",
+            file=sys.stderr,
+        )
+    if args.exact_duration_probing:
+        print(
+            "[deprecated] --exact-duration-probing is now a no-op "
+            "(adaptive duration sampling removed)",
+            file=sys.stderr,
+        )
 
     src_folder = args.src
     if not src_folder:
@@ -100,8 +114,6 @@ def main():
     duration_resolver = DurationResolver(
         enabled=not args.no_ffprobe_duration,
         fallback_seconds=args.clip_duration_seconds,
-        use_windows_metadata=not args.no_windows_metadata_duration,
-        adaptive_sampling=not args.exact_duration_probing,
         track_health=enable_compress and not args.no_hybrid,
     )
 

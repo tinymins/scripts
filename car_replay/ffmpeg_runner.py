@@ -34,14 +34,31 @@ class WarningTracker:
     def total_warnings(self):
         return sum(self.counts.values())
 
+    UNMATCHED_ERROR_SUSPICIOUS_THRESHOLD = 50
+
     def is_suspicious(self):
+        """三档之一：命中可疑规则或 unmatched_error_lines 超过绝对阈值。"""
+        if self.unmatched_error_lines > self.UNMATCHED_ERROR_SUSPICIOUS_THRESHOLD:
+            return True
         for key, threshold in SUSPICIOUS_RULES.items():
             if self.counts.get(key, 0) >= threshold:
                 return True
         return False
 
     def is_clean(self):
-        return self.total_warnings == 0 and self.unmatched_error_lines == 0
+        """三档之一：无任何 error 计数 + 不可疑。"""
+        return (
+            self.total_warnings == 0
+            and self.unmatched_error_lines == 0
+            and not self.is_suspicious()
+        )
+
+    def is_fatal(self):
+        """三档之一：tracker 自身可识别的致命计数（当前无 fatal/panic 类正则，恒 False）。
+
+        调用方应另行结合 returncode != 0 做最终致命判定。
+        """
+        return False
 
     def severity(self):
         if self.is_clean():
