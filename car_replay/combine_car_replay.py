@@ -885,7 +885,10 @@ def _copy_merge_videos(video_group, combined_file):
             "-movflags", "+faststart",
             combined_file,
         ]
-        subprocess.run(command, check=True)
+        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(command)
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        return elapsed, tracker
     finally:
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
@@ -994,7 +997,9 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         return input_size, output_size, elapsed
     else:
         # 不压缩：仅 stream copy 合并；.ts 也会 remux 到 .mp4 输出
-        _copy_merge_videos(video_group, combined_file)
+        elapsed, tracker = _copy_merge_videos(video_group, combined_file)
+        if warning_collector is not None:
+            warning_collector.append((combined_file, tracker))
         print("Merge complete.")
 
     # 设置合并后文件的时间属性为最后一个视频文件的时间属性
@@ -1112,7 +1117,7 @@ def process_videos_in_folder(
         print(f"{'='*70}")
 
         # ============ FFmpeg 警告汇总 ============
-        if enable_compress and warning_collector:
+        if warning_collector:
             suspicious_items = []
             warn_items = []
             ok_count = 0
