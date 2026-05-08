@@ -7,9 +7,7 @@ ffprobe 调用统一走 `_run_ffprobe`（含 timeout）。
 from __future__ import annotations
 
 import json
-import math
 import os
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -17,32 +15,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 from .config import FFPROBE
+from .ffmpeg_runner import _run_ffprobe
 from .naming import _basename, parse_video_filename
-
-
-def _run_ffprobe(path, timeout: float = 60.0) -> Tuple[Optional[float], bool]:
-    """跑一次 ffprobe 取 format.duration。
-
-    Returns (duration_or_None, broken_bool)。失败 / 非零返回码 / 解析失败 / 超时 / OSError → broken=True。
-    """
-    if not os.path.exists(FFPROBE):
-        return (None, True)
-    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-    except (subprocess.TimeoutExpired, OSError):
-        return (None, True)
-    if r.returncode != 0:
-        return (None, True)
-    raw = (r.stdout or "").strip()
-    try:
-        duration = float(raw)
-    except ValueError:
-        return (None, True)
-    if not math.isfinite(duration) or duration <= 0:
-        return (None, True)
-    return (duration, False)
 
 
 def _cache_key(path) -> str:
