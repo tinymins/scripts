@@ -126,5 +126,55 @@ class WarningTrackerTests(unittest.TestCase):
 
 
 
+class HealthTrackingTests(unittest.TestCase):
+    def _make_resolver(self, stderr_text, returncode=0, stdout="12.5"):
+        resolver = replay.DurationResolver(
+            enabled=True,
+            use_windows_metadata=False,
+            adaptive_sampling=False,
+            track_health=True,
+        )
+        # 替换 ffprobe 调用为内联 mock
+        class _Result:
+            def __init__(self):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr_text
+        original_run = replay.subprocess.run
+        replay.subprocess.run = lambda *a, **kw: _Result()
+        # 让 FFPROBE 路径检查通过
+        original_exists = replay.os.path.exists
+        replay.os.path.exists = lambda p: True if p == replay.FFPROBE else original_exists(p)
+        try:
+            duration = resolver._resolve_duration("/fake/file.ts")
+        finally:
+            replay.subprocess.run = original_run
+            replay.os.path.exists = original_exists
+        return resolver, duration
+
+    def test_clean_stderr_marks_file_healthy(self):
+        resolver, duration = self._make_resolver("")
+        self.assertEqual(duration, 12.5)
+        self.assertTrue(resolver.is_healthy("/fake/file.ts"))
+
+    def test_invalid_dts_marks_file_unhealthy(self):
+        resolver, duration = self._make_resolver(
+            "[mov,mp4 @ 0x1] Invalid DTS: 100 PTS: 99, replacing by guess\n"
+        )
+        self.assertEqual(duration, 12.5)
+        self.assertFalse(resolver.is_healthy("/fake/file.ts"))
+        self.assertEqual(resolver.stats["unhealthy"], 1)
+
+    def test_track_health_disables_adaptive_and_metadata(self):
+        resolver = replay.DurationResolver(
+            enabled=True,
+            use_windows_metadata=True,
+            adaptive_sampling=True,
+            track_health=True,
+        )
+        self.assertFalse(resolver.adaptive_sampling)
+        self.assertFalse(resolver.use_windows_metadata)
+
+
 if __name__ == "__main__":
     unittest.main()

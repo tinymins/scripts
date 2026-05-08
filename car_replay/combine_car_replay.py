@@ -266,6 +266,16 @@ def format_size(size_bytes):
 class DurationResolver:
     WINDOWS_METADATA_BATCH_SIZE = 500
     DURATION_MATCH_TOLERANCE_SECONDS = 1.0
+    HEALTH_BAD_PATTERNS = (
+        "Invalid DTS",
+        "Invalid PTS",
+        "corrupt frame",
+        "corrupt decoded frame",
+        "non-existing PPS",
+        "missing reference",
+        "Could not find ref",
+        "application_invalid",
+    )
 
     def __init__(
         self,
@@ -273,19 +283,26 @@ class DurationResolver:
         fallback_seconds=None,
         use_windows_metadata=True,
         adaptive_sampling=True,
+        track_health=False,
     ):
         self.enabled = enabled
         self.fallback_seconds = fallback_seconds
         self.use_windows_metadata = use_windows_metadata
-        self.adaptive_sampling = adaptive_sampling
+        # 健康追踪要求每个文件单独 probe，与自适应抽样及 Windows metadata 快查冲突。
+        self.track_health = track_health
+        self.adaptive_sampling = adaptive_sampling and not track_health
+        if track_health:
+            self.use_windows_metadata = False
         self.cache = {}
         self.cache_sources = {}
+        self.health_cache = {}
         self.windows_metadata_attempted = False
         self.stats = {
             "windows_metadata_hits": 0,
             "ffprobe_probes": 0,
             "adaptive_reused": 0,
             "unavailable": 0,
+            "unhealthy": 0,
         }
 
     def duration_for_file(self, path):
@@ -324,7 +341,8 @@ class DurationResolver:
             f"Windows metadata hits={delta['windows_metadata_hits']}, "
             f"ffprobe probes={delta['ffprobe_probes']}, "
             f"adaptive reused={delta['adaptive_reused']}, "
-            f"unavailable={delta['unavailable']}"
+            f"unavailable={delta['unavailable']}, "
+            f"unhealthy={delta['unhealthy']}"
         )
 
     def _cache_key(self, path):
@@ -480,6 +498,10 @@ $result | ConvertTo-Json -Compress
                 durations[path] = duration_float
         return durations
 
+    def is_healthy(self, path):
+        """返回 True / False / None（None = 未检测）。"""
+        return self.health_cache.get(self._cache_key(path))
+
     def _resolve_duration(self, path):
         basename = _basename(path)
         if not self.enabled:
@@ -492,9 +514,10 @@ $result | ConvertTo-Json -Compress
         if not os.path.exists(FFPROBE):
             return self._fallback(basename, f"ffprobe not found: {FFPROBE}")
 
+        verbosity = "warning" if self.track_health else "error"
         command = [
             FFPROBE,
-            "-v", "error",
+            "-v", verbosity,
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             path,
@@ -510,8 +533,28 @@ $result | ConvertTo-Json -Compress
         except OSError as exc:
             return self._fallback(basename, f"ffprobe failed: {exc}")
 
+        if self.track_health:
+            stderr_text = result.stderr or ""
+            healthy = not any(pat in stderr_text for pat in self.HEALTH_BAD_PATTERNS)
+            self.health_cache[self._cache_key(path)] = healthy
+            if not healthy:
+                self.stats["unhealthy"] += 1
+                first_match = next(
+                    (pat for pat in self.HEALTH_BAD_PATTERNS if pat in stderr_text),
+                    "?",
+                )
+                print(f"  Unhealthy input detected ({first_match}): {basename}")
+
         if result.returncode != 0:
-            detail = result.stderr.strip() or f"exit code {result.returncode}"
+            detail = (result.stderr or "").strip() or f"exit code {result.returncode}"
+            # track_health 模式下 stdout 仍可能含有有效时长，先尝试解析。
+            stdout_value = (result.stdout or "").strip()
+            try:
+                duration = float(stdout_value)
+                if math.isfinite(duration) and duration > 0:
+                    return duration
+            except ValueError:
+                pass
             return self._fallback(basename, f"ffprobe failed: {detail}")
 
         try:
@@ -893,7 +936,7 @@ def _copy_merge_videos(video_group, combined_file):
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
 
-def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None, warning_collector=None):
+def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None, warning_collector=None, duration_resolver=None):
     # 获取最后一个视频文件的时间属性
     last_video = video_group[-1]
     last_video_stats = os.stat(last_video)
@@ -902,6 +945,16 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
 
     # 获取通道ID（从第一个视频文件名提取）
     camera_id = extract_camera_id(_basename(video_group[0]))
+
+    # 预扫健康度：任一输入文件不健康则该组改走 -c copy（避免 NVENC 暂停画面问题）
+    if enable_compress and duration_resolver is not None:
+        unhealthy = [v for v in video_group if duration_resolver.is_healthy(v) is False]
+        if unhealthy:
+            print(
+                f"  Group has {len(unhealthy)} unhealthy input(s) "
+                f"e.g. {_basename(unhealthy[0])}; falling back to -c copy for safety"
+            )
+            enable_compress = False
 
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩：直接从源压缩到目标
@@ -1079,7 +1132,7 @@ def process_videos_in_folder(
             print(f"Group contains {len(group)} files")
 
             if not check_file_exists(combined_file_path):
-                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override, warning_collector=warning_collector)
+                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override, warning_collector=warning_collector, duration_resolver=duration_resolver)
                 total_input_size += in_sz
                 total_output_size += out_sz
                 total_elapsed += elapsed
@@ -1216,6 +1269,11 @@ def main():
         action="store_true",
         help="禁用自适应抽样；需要时对每个视频精确探测时长（会更慢）",
     )
+    parser.add_argument(
+        "--no-hybrid",
+        action="store_true",
+        help="禁用混合模式（不预扫输入健康度，启用 --compress 时坏输入也强制走 NVENC）",
+    )
     parser.add_argument("--allow-combined-input", action="store_true", help="允许从路径包含 _Combined 的目录读取")
     args = parser.parse_args()
 
@@ -1259,7 +1317,11 @@ def main():
         fallback_seconds=args.clip_duration_seconds,
         use_windows_metadata=not args.no_windows_metadata_duration,
         adaptive_sampling=not args.exact_duration_probing,
+        track_health=enable_compress and not args.no_hybrid,
     )
+
+    if duration_resolver.track_health:
+        print("Hybrid mode ON: unhealthy inputs will fall back to -c copy per group")
 
     process_videos_in_folder(
         src_folder,
