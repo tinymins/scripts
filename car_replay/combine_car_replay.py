@@ -5,9 +5,191 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import traceback
 from datetime import datetime, timedelta
+
+
+# ============================================================
+# FFmpeg 警告分类与汇总
+# ============================================================
+
+# 严重门槛（命中任一即标 SUSPICIOUS，需要人工二次确认）
+SUSPICIOUS_RULES = {
+    "corrupt_frame": 1,
+    "concealing": 8,
+    "decode_error": 8,
+    "slice_header": 8,
+    "mb_decode": 8,
+    "missing_ref": 1,
+    "missing_picture": 1,
+    "non_existing_pps": 1,
+    "application_invalid": 1,
+    "invalid_dts": 8,
+    "nonmono_dts": 8,
+    "guess_pts": 8,
+    "bytestream": 8,
+    "co_located_poc": 8,
+}
+
+# 模式按优先级匹配（先匹配的胜出，避免一行被算两次）
+WARNING_PATTERNS = [
+    ("corrupt_frame", re.compile(r"corrupt decoded frame|corrupt input|Corrupted frame", re.I)),
+    ("concealing", re.compile(r"concealing\s+\d+|error concealment", re.I)),
+    ("missing_ref", re.compile(r"reference picture missing|Missing reference picture|reference frame missing", re.I)),
+    ("missing_picture", re.compile(r"missing picture in access unit|No start code|missing picture", re.I)),
+    ("non_existing_pps", re.compile(r"non-existing PPS|non-existing SPS|sps_id .* out of range|pps_id .* out of range", re.I)),
+    ("application_invalid", re.compile(r"Application provided invalid", re.I)),
+    ("slice_header", re.compile(r"decode_slice_header error|slice header damaged", re.I)),
+    ("mb_decode", re.compile(r"\bmb decoding\b|MB decoding error|cbp too large|ac-tex damaged|AC tex damaged|dc-tex damaged", re.I)),
+    ("co_located_poc", re.compile(r"co located POCs unavailable|co-located", re.I)),
+    ("bytestream", re.compile(r"bytestream", re.I)),
+    ("decode_error", re.compile(r"error while decoding|error decoding|Error decoding|decoding error", re.I)),
+    ("nonmono_dts", re.compile(r"non[- ]monoton(ous|ic) (DTS|PTS)|out of order", re.I)),
+    ("invalid_dts", re.compile(r"Invalid (DTS|PTS)", re.I)),
+    ("guess_pts", re.compile(r"replacing by guess|generating non-monotonous|generating non-monotonic", re.I)),
+]
+
+WARNING_LABELS = {
+    "corrupt_frame": "画面损坏帧（corrupt decoded frame）",
+    "concealing": "错误遮蔽（concealing）",
+    "missing_ref": "参考帧丢失（reference picture missing）",
+    "missing_picture": "图像缺失（missing picture）",
+    "non_existing_pps": "流参数集错误（non-existing PPS/SPS）",
+    "application_invalid": "应用层无效输入（Application provided invalid）",
+    "slice_header": "切片头损坏（decode_slice_header error）",
+    "mb_decode": "宏块解码错（MB decoding/AC tex/DC tex damaged）",
+    "co_located_poc": "共置 POC 不可用（co located POCs unavailable）",
+    "bytestream": "字节流错（bytestream）",
+    "decode_error": "解码错误（error while decoding）",
+    "nonmono_dts": "时间戳非单调（non-monotonous DTS/PTS）",
+    "invalid_dts": "时间戳无效（Invalid DTS/PTS）",
+    "guess_pts": "时间戳猜测替代（replacing by guess）",
+}
+
+
+class WarningTracker:
+    """逐行扫描 ffmpeg 输出，归类并计数警告 / 错误。"""
+
+    def __init__(self):
+        self.counts = {key: 0 for key, _ in WARNING_PATTERNS}
+        self.first_examples = {}
+        self.unmatched_error_lines = 0
+
+    def feed(self, line):
+        stripped = line.rstrip("\r\n")
+        if not stripped:
+            return
+        for key, pattern in WARNING_PATTERNS:
+            if pattern.search(stripped):
+                self.counts[key] += 1
+                if key not in self.first_examples:
+                    self.first_examples[key] = stripped[:240]
+                return
+        if "error" in stripped.lower() and "@" in stripped and "frame=" not in stripped:
+            self.unmatched_error_lines += 1
+
+    @property
+    def total_warnings(self):
+        return sum(self.counts.values())
+
+    def is_suspicious(self):
+        for key, threshold in SUSPICIOUS_RULES.items():
+            if self.counts.get(key, 0) >= threshold:
+                return True
+        return False
+
+    def is_clean(self):
+        return self.total_warnings == 0 and self.unmatched_error_lines == 0
+
+    def severity(self):
+        if self.is_clean():
+            return "OK"
+        if self.is_suspicious():
+            return "SUSPICIOUS"
+        return "WARN"
+
+    def category_summary(self):
+        rows = []
+        for key, _ in WARNING_PATTERNS:
+            count = self.counts.get(key, 0)
+            if count > 0:
+                rows.append((key, count, WARNING_LABELS[key]))
+        return rows
+
+    def format_oneline(self):
+        rows = self.category_summary()
+        parts = [f"{key}={count}" for key, count, _ in rows]
+        if self.unmatched_error_lines:
+            parts.append(f"other_error_lines={self.unmatched_error_lines}")
+        return ", ".join(parts) if parts else "no warnings"
+
+    def format_detail(self):
+        lines = [f"severity: {self.severity()}", f"total: {self.total_warnings}"]
+        for key, count, label in self.category_summary():
+            lines.append(f"  {label}: {count}")
+            example = self.first_examples.get(key)
+            if example:
+                lines.append(f"    e.g.: {example}")
+        if self.unmatched_error_lines:
+            lines.append(f"  其它包含 'error' 的输出行: {self.unmatched_error_lines}")
+        return "\n".join(lines)
+
+
+def _run_ffmpeg_capturing_warnings(cmd):
+    """运行 ffmpeg，实时把 stderr 透传到控制台并归类警告。
+
+    返回 (returncode, elapsed_seconds, tracker)。
+    """
+    tracker = WarningTracker()
+    start = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+        universal_newlines=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stderr is not None
+    try:
+        for raw_line in proc.stderr:
+            sys.stderr.write(raw_line)
+            sys.stderr.flush()
+            tracker.feed(raw_line)
+    finally:
+        proc.wait()
+    elapsed = time.time() - start
+    return proc.returncode, elapsed, tracker
+
+
+def _write_per_file_warning_log(output_path, tracker, cmd):
+    log_path = output_path + ".warn.log"
+    with open(log_path, "w", encoding="utf-8") as fh:
+        fh.write(f"output: {output_path}\n")
+        fh.write(f"cmd: {' '.join(cmd)}\n\n")
+        fh.write(tracker.format_detail())
+        fh.write("\n")
+    return log_path
+
+
+def _append_master_warning_report(target_folder_base, output_path, tracker):
+    severity = tracker.severity()
+    report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
+    new_file = not os.path.exists(report_path)
+    with open(report_path, "a", encoding="utf-8") as fh:
+        if new_file:
+            fh.write("# 转码警告汇总\n")
+            fh.write("# 列表: [严重程度] 输出文件 -- 各类警告计数\n")
+            fh.write("# 严重程度:\n")
+            fh.write("#   SUSPICIOUS - 强烈建议人工二次确认（画面可能损坏 / 暂停）\n")
+            fh.write("#   WARN       - 有少量警告，通常无碍\n")
+            fh.write(f"# 严重判定规则: {SUSPICIOUS_RULES}\n\n")
+        rel = os.path.relpath(output_path, target_folder_base)
+        fh.write(f"[{severity:11s}] {rel} -- {tracker.format_oneline()}\n")
+    return report_path
 
 # ============================================================
 # 压缩参数配置 - 测试确认后可修改此处
@@ -398,15 +580,13 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
 
     print(f"  CMD: {' '.join(cmd)}")
 
-    start_time = time.time()
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
-    elapsed = time.time() - start_time
+    returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd)
 
-    if result.returncode != 0:
+    if returncode != 0:
         if os.path.exists(temp_output):
             os.remove(temp_output)
         print(f"  ERROR: Compression failed!")
-        return False, 0, 0, elapsed
+        return False, 0, 0, elapsed, tracker
 
     # 重命名为最终文件
     if os.path.exists(output_path):
@@ -420,7 +600,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
         f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
         f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
     )
-    return True, input_size, output_size, elapsed
+    return True, input_size, output_size, elapsed, tracker
 
 
 class VideoInfo:
@@ -710,7 +890,7 @@ def _copy_merge_videos(video_group, combined_file):
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
 
-def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None):
+def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None, warning_collector=None):
     # 获取最后一个视频文件的时间属性
     last_video = video_group[-1]
     last_video_stats = os.stat(last_video)
@@ -723,7 +903,9 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩：直接从源压缩到目标
         print(f"Compressing single file: {video_group[0]} to {combined_file}")
-        success, in_sz, out_sz, elapsed = compress_video(video_group[0], combined_file, camera_id, cq_override)
+        success, in_sz, out_sz, elapsed, tracker = compress_video(video_group[0], combined_file, camera_id, cq_override)
+        if warning_collector is not None and tracker is not None:
+            warning_collector.append((combined_file, tracker))
         if success:
             os.utime(combined_file, (last_access_time, last_mod_time))
             return in_sz, out_sz, elapsed
@@ -782,13 +964,14 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         ]
 
         print(f"  CMD: {' '.join(cmd)}")
-        start_time = time.time()
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL)
-        elapsed = time.time() - start_time
+        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd)
 
         os.remove(concat_list_path)
 
-        if result.returncode != 0:
+        if warning_collector is not None:
+            warning_collector.append((combined_file, tracker))
+
+        if returncode != 0:
             if os.path.exists(temp_output):
                 os.remove(temp_output)
             print(f"  ERROR: Merge+Compress failed!")
@@ -865,6 +1048,7 @@ def process_videos_in_folder(
         total_input_size = 0
         total_output_size = 0
         total_elapsed = 0
+        warning_collector = []
 
         # 处理每个视频组
         for group in grouped_videos:
@@ -890,7 +1074,7 @@ def process_videos_in_folder(
             print(f"Group contains {len(group)} files")
 
             if not check_file_exists(combined_file_path):
-                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override)
+                in_sz, out_sz, elapsed = merge_videos(group, combined_file_path, enable_compress, cq_override, warning_collector=warning_collector)
                 total_input_size += in_sz
                 total_output_size += out_sz
                 total_elapsed += elapsed
@@ -926,6 +1110,46 @@ def process_videos_in_folder(
             else:
                 print(f"  压缩总耗时: {seconds}s")
         print(f"{'='*70}")
+
+        # ============ FFmpeg 警告汇总 ============
+        if enable_compress and warning_collector:
+            suspicious_items = []
+            warn_items = []
+            ok_count = 0
+            os.makedirs(target_folder_base, exist_ok=True)
+            master_report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
+            if os.path.exists(master_report_path):
+                os.remove(master_report_path)
+
+            for output_path, tracker in warning_collector:
+                severity = tracker.severity()
+                if severity == "OK":
+                    ok_count += 1
+                    continue
+                # 写每文件 .warn.log
+                _write_per_file_warning_log(output_path, tracker, ["(see master report)"])
+                _append_master_warning_report(target_folder_base, output_path, tracker)
+                if severity == "SUSPICIOUS":
+                    suspicious_items.append((output_path, tracker))
+                else:
+                    warn_items.append((output_path, tracker))
+
+            print(f"\n{'='*70}")
+            print("FFmpeg 转码警告汇总")
+            print(f"{'='*70}")
+            print(f"  干净: {ok_count}")
+            print(f"  轻微警告 (WARN): {len(warn_items)}")
+            print(f"  严重 (SUSPICIOUS, 强烈建议人工检查): {len(suspicious_items)}")
+            if suspicious_items:
+                print("\n  ⚠ SUSPICIOUS 文件（画面可能损坏 / 暂停）:")
+                for output_path, tracker in suspicious_items:
+                    rel = os.path.relpath(output_path, target_folder_base)
+                    print(f"    - {rel}")
+                    print(f"        {tracker.format_oneline()}")
+            if warn_items or suspicious_items:
+                print(f"\n  详细报告: {master_report_path}")
+                print(f"  每个有警告的输出旁边还会有同名 .warn.log")
+            print(f"{'='*70}")
 
     # 处理其他类型文件
     if other_files:
