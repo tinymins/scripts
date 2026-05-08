@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from .config import FFMPEG, format_size, get_compress_profile
-from .ffmpeg_runner import _run_ffmpeg_capturing_warnings
+from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 
 
-def compress_video(input_path, output_path, camera_id, cq_override=None):
+def compress_video(input_path, output_path, camera_id, cq_override=None,
+                   expected_duration=None):
     """
     使用 hevc_nvenc 压缩视频文件。
     input_path: 输入文件（合并后的临时文件或单个源文件）
     output_path: 最终输出路径
     camera_id: 通道ID，用于选择压缩参数
-    返回 True/False
+    expected_duration: 输入合计时长（秒），用于 post_validate 时长比对；None 则跳过比对
+    返回 (success, in_sz, out_sz, elapsed, tracker)
     """
     profile = get_compress_profile(camera_id, cq_override)
     input_size = os.path.getsize(input_path)
@@ -52,10 +55,34 @@ def compress_video(input_path, output_path, camera_id, cq_override=None):
 
     returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd)
 
-    if returncode != 0:
+    result = CommandResult(
+        returncode=returncode, elapsed=elapsed, tracker=tracker,
+        output_path=Path(temp_output), expected_duration=expected_duration,
+    )
+
+    if result.is_fatal() or result.is_suspicious():
         if os.path.exists(temp_output):
-            os.remove(temp_output)
-        print(f"  ERROR: Compression failed!")
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
+        if result.is_fatal():
+            print(f"  ERROR: Compression failed (fatal: rc={returncode})!")
+        else:
+            print(
+                f"  WARN: Compression looks suspicious "
+                f"({tracker.format_oneline()}), discarding output"
+            )
+        return False, 0, 0, elapsed, tracker
+
+    ok, reason = result.post_validate()
+    if not ok:
+        print(f"  [post-validate] {reason}; falling back")
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
         return False, 0, 0, elapsed, tracker
 
     # 重命名为最终文件
