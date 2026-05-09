@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -188,6 +189,33 @@ _BAR_EMPTY = "░"
 _SPINNER_FRAMES = "|/-\\"
 
 
+def _shutil_get_terminal_size():
+    return shutil.get_terminal_size(fallback=(120, 24))
+
+
+def _truncate_visible(s: str, max_visible: int) -> str:
+    """按可见长度截断，保留 ANSI 转义。超出部分 + 重置序列。"""
+    out = []
+    visible = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "\x1b":
+            m = _ANSI_RE.match(s, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        if visible >= max_visible:
+            break
+        out.append(ch)
+        visible += 1
+        i += 1
+    out.append("\x1b[0m")
+    return "".join(out)
+
+
 def _parse_ffmpeg_time_to_seconds(t: str):
     """ffmpeg time= 字段（HH:MM:SS.ms 或 N/A 或负数）→ float 秒；解析失败 → None。"""
     if not t or t == "N/A":
@@ -322,12 +350,17 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                     f"err_lines={tracker.unmatched_error_lines}", _C_RED, bold=True,
                 ))
         line = " ".join(parts)
-        # 始终使用 \r 覆盖；非 TTY 终端通常也识别 \r（VSCode/IDE/git-bash 等 wrapper
-        # 常被识别为非 TTY 但仍支持单行覆盖）。真不识别 \r 的环境最多是字符堆叠，
-        # 不至于刷屏几十行。
+        # 截断到终端宽度 - 1，避免 wrap 后 \r 擦不干净（会把首行残留）
+        try:
+            term_w = max(40, _shutil_get_terminal_size().columns - 1)
+        except Exception:
+            term_w = 119
         visible = _visible_len(line)
-        pad = max(state["last_line_len"] - visible, 0)
-        sys.stdout.write("\r" + line + (" " * pad))
+        if visible > term_w:
+            line = _truncate_visible(line, term_w)
+            visible = _visible_len(line)
+        # \x1b[2K 擦整行 + \r 回到行首；比手动填空格更可靠
+        sys.stdout.write("\r\x1b[2K" + line)
         sys.stdout.flush()
         state["last_line_len"] = visible
         state["last_flush"] = time.time()
@@ -335,7 +368,7 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
 
     def clear_status_line() -> None:
         if state["last_line_len"]:
-            sys.stdout.write("\r" + (" " * state["last_line_len"]) + "\r")
+            sys.stdout.write("\r\x1b[2K")
             sys.stdout.flush()
             state["last_line_len"] = 0
 
