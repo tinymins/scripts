@@ -166,6 +166,86 @@ _PROGRESS_FIELD_RES = {
 }
 
 
+# ============================================================
+# ANSI 染色 + 进度条
+# ============================================================
+
+# 颜色码
+_C_GRAY = 90       # elapsed / 暗 / 分隔符 / 进度条未完成段
+_C_RED = 91        # 进度 <33% / FATAL 警告
+_C_GREEN = 92      # 进度 >=66% / time / speed
+_C_YELLOW = 93     # 进度 33-66% / 非 FATAL 警告
+_C_CYAN = 96       # frame / fps / spinner
+_C_BOLD = 1
+
+_BAR_LEN = 20
+_BAR_FILLED = "█"
+_BAR_EMPTY = "░"
+_SPINNER_FRAMES = "|/-\\"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _colors_enabled() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _color(text: str, code: int, bold: bool = False) -> str:
+    """用 ANSI 给文本染色；非 TTY 或 NO_COLOR 时返回原文。"""
+    if not _colors_enabled():
+        return text
+    if bold:
+        return f"\x1b[{_C_BOLD};{code}m{text}\x1b[0m"
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def _visible_len(s: str) -> int:
+    return len(_ANSI_RE.sub("", s))
+
+
+def _parse_ffmpeg_time_to_seconds(t: str):
+    """ffmpeg time= 字段（HH:MM:SS.ms 或 N/A 或负数）→ float 秒；解析失败 → None。"""
+    if not t or t == "N/A":
+        return None
+    s = t.strip()
+    if s.startswith("-"):
+        return None
+    try:
+        if ":" in s:
+            parts = s.split(":")
+            if len(parts) != 3:
+                return None
+            h, m, sec = parts
+            return int(h) * 3600 + int(m) * 60 + float(sec)
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _percent_color(pct: float) -> int:
+    if pct < 33:
+        return _C_RED
+    if pct < 66:
+        return _C_YELLOW
+    return _C_GREEN
+
+
+def _render_progress_bar(pct: float):
+    """返回 (染色后字符串, 染色后百分比字符串)。pct 已 clamp 0-100。"""
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round(pct / 100.0 * _BAR_LEN))
+    filled = max(0, min(_BAR_LEN, filled))
+    color = _percent_color(pct)
+    bar = _color(_BAR_FILLED * filled, color) + _color(_BAR_EMPTY * (_BAR_LEN - filled), _C_GRAY)
+    pct_str = _color(f"{int(pct):3d}%", color)
+    return bar, pct_str
+
+
 def _is_progress_line(line: str) -> bool:
     """ffmpeg 自身的进度刷新行：典型形如
     ``frame=  123 fps= 30 q=28.0 size=...kB time=00:00:41 bitrate=...kbits/s speed=1.2x``。
@@ -180,10 +260,12 @@ def _format_elapsed(seconds: float) -> str:
     return f"{mm:02d}:{ss:02d}"
 
 
-def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False):
+def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False,
+                                   expected_duration=None):
     """运行 ffmpeg，实时归类 stderr 警告并以单行覆盖式打印进度。
 
     verbose=True 时退化为老行为（每行原样透传），用于排障。
+    expected_duration: 预计输出时长（秒），用于渲染进度条；None / 0 → 用 spinner。
     返回 (returncode, elapsed_seconds, tracker)。
     mode 透传给 WarningTracker。
     """
@@ -199,38 +281,76 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
     fd = proc.stderr.fileno()
 
     is_tty = sys.stdout.isatty()
+    has_duration = bool(expected_duration and expected_duration > 0)
     state = {
         "last_flush": 0.0,
         "last_line_len": 0,
         "feed_count_since_flush": 0,
         "any_progress": False,
+        "spinner_idx": 0,
     }
     progress = {}  # type: dict
 
     def render_status(force: bool = False) -> None:
         elapsed_s = time.time() - start
-        parts = [f"[{_format_elapsed(elapsed_s)}]"]
+        parts = [_color(f"[{_format_elapsed(elapsed_s)}]", _C_GRAY)]
+
+        # 进度条 / spinner
         if state["any_progress"]:
-            for k in ("frame", "fps", "time", "bitrate", "speed"):
-                v = progress.get(k, "?")
-                parts.append(f"{k}={v}")
+            cur_secs = _parse_ffmpeg_time_to_seconds(progress.get("time", ""))
+            if has_duration and cur_secs is not None:
+                pct = max(0.0, min(100.0, cur_secs / float(expected_duration) * 100.0))
+                bar, pct_str = _render_progress_bar(pct)
+                parts.append(bar)
+                parts.append(pct_str)
+            else:
+                spin = _SPINNER_FRAMES[state["spinner_idx"] % len(_SPINNER_FRAMES)]
+                state["spinner_idx"] += 1
+                parts.append(_color(spin, _C_CYAN))
+
+            # 进度字段
+            frame = progress.get("frame")
+            fps = progress.get("fps")
+            if frame is not None:
+                parts.append(_color(f"frame={frame}", _C_CYAN))
+            if fps is not None:
+                parts.append(_color(f"fps={fps}", _C_CYAN))
+            time_v = progress.get("time")
+            if time_v is not None:
+                secs = _parse_ffmpeg_time_to_seconds(time_v)
+                time_disp = f"time={secs:.2f}s" if secs is not None else f"time={time_v}"
+                parts.append(_color(time_disp, _C_GREEN))
+            bitrate = progress.get("bitrate")
+            if bitrate is not None:
+                parts.append(_color(f"bitrate={bitrate}", _C_GRAY))
+            speed = progress.get("speed")
+            if speed is not None:
+                # speed 字段已含 x 后缀（如 "3.18x"）；缩成数字+x
+                parts.append(_color(speed, _C_GREEN))
+
         nonzero = [(k, c) for k, c in tracker.counts.items() if c > 0]
         nonzero.sort(key=lambda x: -x[1])
         if nonzero or tracker.unmatched_error_lines:
-            parts.append("|")
+            parts.append(_color("|", _C_GRAY))
             shown = nonzero[:5]
             for k, c in shown:
-                parts.append(f"{k}={c}")
+                if k in WarningTracker.FATAL_CATEGORIES:
+                    parts.append(_color(f"{k}={c}", _C_RED, bold=True))
+                else:
+                    parts.append(_color(f"{k}={c}", _C_YELLOW))
             if len(nonzero) > 5:
-                parts.append("...")
+                parts.append(_color("...", _C_GRAY))
             if tracker.unmatched_error_lines:
-                parts.append(f"err_lines={tracker.unmatched_error_lines}")
+                parts.append(_color(
+                    f"err_lines={tracker.unmatched_error_lines}", _C_RED, bold=True,
+                ))
         line = " ".join(parts)
         if is_tty:
-            pad = max(state["last_line_len"] - len(line), 0)
+            visible = _visible_len(line)
+            pad = max(state["last_line_len"] - visible, 0)
             sys.stdout.write("\r" + line + (" " * pad))
             sys.stdout.flush()
-            state["last_line_len"] = len(line)
+            state["last_line_len"] = visible
         else:
             # 非 TTY：每次直接换行打印；force=False 时仍按节流频率
             sys.stdout.write(line + "\n")
@@ -389,3 +509,69 @@ class CommandResult:
             return (True, "")
         except Exception as exc:  # 任意意外都收敛
             return (False, f"post_validate exception: {exc}")
+
+
+# ============================================================
+# 内嵌自检（python -m car_replay.ffmpeg_runner）
+# ============================================================
+
+
+def _selftest():
+    """对染色 / 进度条 / 字段渲染做轻量验证。
+
+    通过 monkey-patch sys.stdout.isatty + 关闭 NO_COLOR 强制启用染色，
+    然后调用 _color/_render_progress_bar 直接断言。
+    """
+    import io
+
+    # ---- 1) _color: TTY=True 时染色，NO_COLOR 时关 ----
+    saved_no_color = os.environ.pop("NO_COLOR", None)
+
+    class _FakeTTY(io.StringIO):
+        def isatty(self):  # noqa: D401
+            return True
+
+    saved_stdout = sys.stdout
+    sys.stdout = _FakeTTY()
+    try:
+        s = _color("hi", _C_RED)
+        assert s == "\x1b[91mhi\x1b[0m", s
+        bold = _color("x", _C_RED, bold=True)
+        assert bold == "\x1b[1;91mx\x1b[0m", bold
+
+        # ---- 2) 进度条比例 ----
+        bar0, pct0 = _render_progress_bar(0)
+        bar50, pct50 = _render_progress_bar(50)
+        bar100, pct100 = _render_progress_bar(100)
+        assert _ANSI_RE.sub("", bar0) == _BAR_EMPTY * _BAR_LEN
+        assert _ANSI_RE.sub("", bar100) == _BAR_FILLED * _BAR_LEN
+        # 50% → 10/10 split
+        plain50 = _ANSI_RE.sub("", bar50)
+        assert plain50.count(_BAR_FILLED) == 10 and plain50.count(_BAR_EMPTY) == 10, plain50
+        # 颜色档位
+        assert "\x1b[91m" in bar0      # 红
+        assert "\x1b[93m" in bar50     # 黄
+        assert "\x1b[92m" in bar100    # 绿
+
+        # ---- 3) _parse_ffmpeg_time_to_seconds ----
+        assert abs(_parse_ffmpeg_time_to_seconds("00:00:50.97") - 50.97) < 1e-6
+        assert _parse_ffmpeg_time_to_seconds("N/A") is None
+        assert _parse_ffmpeg_time_to_seconds("-00:00:01") is None
+
+        # ---- 4) _visible_len 不计 ANSI ----
+        s = _color("frame=975", _C_CYAN)
+        assert _visible_len(s) == len("frame=975"), _visible_len(s)
+
+        # ---- 5) NO_COLOR 短路 ----
+        os.environ["NO_COLOR"] = "1"
+        assert _color("hi", _C_RED) == "hi"
+        os.environ.pop("NO_COLOR")
+    finally:
+        sys.stdout = saved_stdout
+        if saved_no_color is not None:
+            os.environ["NO_COLOR"] = saved_no_color
+    print("ffmpeg_runner selftest OK")
+
+
+if __name__ == "__main__":
+    _selftest()
