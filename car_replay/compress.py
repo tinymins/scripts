@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from . import console
 from .config import FFMPEG, format_size, get_compress_profile
 from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 
 
 def compress_video(input_path, output_path, camera_id, cq_override=None,
-                   expected_duration=None, verbose_ffmpeg=False):
+                   expected_duration=None, verbose_ffmpeg=False,
+                   verbose_cmd=False, src_folder=None):
     """
     使用 hevc_nvenc 压缩视频文件。
     input_path: 输入文件（合并后的临时文件或单个源文件）
@@ -22,7 +24,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
     profile = get_compress_profile(camera_id, cq_override)
     input_size = os.path.getsize(input_path)
 
-    print(f"  Compressing [{camera_id or '??'}] CQ{profile['cq']}...")
+    console.step(f"Compressing [{camera_id or '??'}] CQ{profile['cq']}...")
 
     temp_output = output_path + ".compress_tmp.mp4"
 
@@ -51,7 +53,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
         temp_output,
     ]
 
-    print(f"  CMD: {' '.join(cmd)}")
+    console.cmd_line(cmd[0], cmd[1:], verbose=verbose_cmd, base_dir=src_folder)
 
     returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
         cmd, verbose=verbose_ffmpeg, expected_duration=expected_duration,
@@ -69,17 +71,18 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
             except OSError:
                 pass
         if result.is_fatal():
-            print(f"  ERROR: Compression failed (fatal: rc={returncode})!")
+            console.error(f"Compression failed (fatal: rc={returncode})!", indent=2)
         else:
-            print(
-                f"  WARN: Compression looks suspicious "
-                f"({tracker.format_oneline()}), discarding output"
+            console.warn(
+                f"Compression looks suspicious "
+                f"({tracker.format_oneline()}), discarding output",
+                indent=2,
             )
         return False, 0, 0, elapsed, tracker
 
     ok, reason = result.post_validate()
     if not ok:
-        print(f"  [post-validate] {reason}; falling back")
+        console.detail(f"[post-validate] {reason}; falling back")
         if os.path.exists(temp_output):
             try:
                 os.remove(temp_output)
@@ -95,8 +98,9 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
     output_size = os.path.getsize(output_path)
     ratio = input_size / output_size if output_size > 0 else 0
     saving = (1 - output_size / input_size) * 100 if input_size > 0 else 0
-    print(
-        f"  Compressed: {format_size(input_size)} -> {format_size(output_size)} "
-        f"({ratio:.1f}x ratio, -{saving:.0f}%) in {elapsed:.1f}s"
+    console.success(
+        f"Compressed: {format_size(input_size)} → {format_size(output_size)} "
+        f"({ratio:.1f}x, -{saving:.0f}%) in {elapsed:.1f}s",
+        indent=2,
     )
     return True, input_size, output_size, elapsed, tracker

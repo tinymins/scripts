@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 
+from . import console
 from .duration import DurationResolver
 from .naming import _contains_combined_path
 from .pipeline import process_videos_in_folder
@@ -94,6 +95,11 @@ def main():
         action="store_true",
         help="原样透传 ffmpeg stderr（关闭单行覆盖式进度，用于排障）",
     )
+    parser.add_argument(
+        "--verbose-cmd",
+        action="store_true",
+        help="完整打印 ffmpeg 命令行 + 文件列表（默认折叠为简短形式）",
+    )
     args = parser.parse_args()
 
     if args.no_windows_metadata_duration:
@@ -137,12 +143,12 @@ def main():
         os.path.dirname(src_folder), f"{os.path.basename(src_folder)}_Combined"
     )
 
-    print(f"Output files will be placed in: {target_folder_base}")
+    console.kv("Output folder", target_folder_base)
     if enable_compress:
         cq_info = f"CQ override: {args.cq}" if args.cq else "使用通道默认值"
-        print(f"Compression ENABLED ({cq_info})")
+        console.kv("Compression", f"ENABLED ({cq_info})")
     else:
-        print("Compression DISABLED")
+        console.kv("Compression", "DISABLED")
 
     if args.cache_dir:
         cache_path = os.path.join(args.cache_dir, "cache.json")
@@ -161,7 +167,7 @@ def main():
     )
 
     if duration_resolver.track_health:
-        print("Hybrid mode ON: unhealthy inputs will fall back to -c copy per group")
+        console.kv("Hybrid mode", "ON (unhealthy inputs → -c copy per group)")
 
     process_videos_in_folder(
         src_folder,
@@ -172,5 +178,6 @@ def main():
         duration_resolver,
         broken_split=not args.no_broken_split,
         verbose_ffmpeg=args.verbose_ffmpeg,
+        verbose_cmd=args.verbose_cmd,
     )
     _pause_before_exit()

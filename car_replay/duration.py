@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 from .config import FFPROBE
+from . import console
 from .ffmpeg_runner import _run_ffprobe
 from .naming import _basename, parse_video_filename
 
@@ -63,7 +64,7 @@ class DurationCache:
                 json.dump(self._entries, f, ensure_ascii=False, separators=(",", ":"))
             os.replace(str(tmp), str(self.cache_path))
         except OSError as exc:
-            print(f"WARNING: 无法写入时长缓存 {self.cache_path}: {exc}")
+            console.warn(f"无法写入时长缓存 {self.cache_path}: {exc}")
 
     def get_valid_entry(self, path) -> Optional[dict]:
         """stat 匹配返回 entry；不匹配 / 不存在 → None。"""
@@ -195,7 +196,7 @@ class DurationResolver:
 
         if pending_duration:
             if self.enabled:
-                print(f"📐 解析时长（ffprobe）: {len(pending_duration)} 个文件")
+                console.step(f"📐 解析时长（ffprobe）: {len(pending_duration)} 个文件")
                 self._run_parallel(pending_duration, self._probe_duration_worker)
             else:
                 for v in pending_duration:
@@ -214,15 +215,17 @@ class DurationResolver:
                     continue
                 pending_health.append(video)
             if pending_health:
-                print(f"🩺 健康探测: {len(pending_health)} 个文件")
+                console.step(f"🩺 健康探测: {len(pending_health)} 个文件")
                 self._run_parallel(pending_health, self._probe_health_worker)
 
         self.cache.save()
-        print(
-            f"📊 时长/健康解析汇总: cache={self.stats['cache_hits']}, "
-            f"filename={self.stats['filename_hits']}, ffprobe={self.stats['ffprobe_probes']}, "
-            f"broken={self.stats['broken']}, unavailable={self.stats['unavailable']}"
-        )
+        console.kvtable([
+            ("cache 命中", self.stats['cache_hits']),
+            ("filename 命中", self.stats['filename_hits']),
+            ("ffprobe 探测", self.stats['ffprobe_probes']),
+            ("broken", self.stats['broken']),
+            ("unavailable", self.stats['unavailable']),
+        ])
 
     def ensure_health_probed(self, path) -> None:
         key = _cache_key(path)
@@ -295,17 +298,19 @@ class DurationResolver:
         key = _cache_key(path)
         if not self._mem_broken.get(key):
             self.stats["broken"] += 1
-            print(f"  ⚠ broken 文件（ffprobe 失败/超时）: {_basename(path)}")
+            console.warn(f"broken 文件（ffprobe 失败/超时）: {_basename(path)}", indent=2)
         self._mem_broken[key] = True
         self.cache.put_health(path, broken=True)
 
     def _record_unavailable(self, path, reason: str) -> Optional[float]:
         basename = _basename(path)
         if self.fallback_seconds is not None:
-            print(f"WARNING: {reason} for {basename}; using fallback duration {self.fallback_seconds}s")
+            console.warn(
+                f"{reason} for {basename}; using fallback duration {self.fallback_seconds}s",
+            )
             self._record_duration(path, self.fallback_seconds, "ffprobe")
             return self.fallback_seconds
-        print(f"ERROR: {reason} for {basename}; duration unavailable")
+        console.error(f"{reason} for {basename}; duration unavailable")
         self.stats["unavailable"] += 1
         self._record_duration(path, None, None)
         return None

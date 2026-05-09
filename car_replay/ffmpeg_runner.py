@@ -13,6 +13,18 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .config import FFPROBE, SUSPICIOUS_RULES, WARNING_LABELS, WARNING_PATTERNS
+from .console import (
+    _ANSI_RE,
+    _C_BOLD,
+    _C_CYAN,
+    _C_GRAY,
+    _C_GREEN,
+    _C_RED,
+    _C_YELLOW,
+    _color,
+    _colors_enabled,
+    _visible_len,
+)
 
 
 def _run_ffprobe(path, timeout: float = 60.0) -> Tuple[Optional[float], bool]:
@@ -167,45 +179,13 @@ _PROGRESS_FIELD_RES = {
 
 
 # ============================================================
-# ANSI 染色 + 进度条
+# 进度条 / spinner 渲染常量
 # ============================================================
-
-# 颜色码
-_C_GRAY = 90       # elapsed / 暗 / 分隔符 / 进度条未完成段
-_C_RED = 91        # 进度 <33% / FATAL 警告
-_C_GREEN = 92      # 进度 >=66% / time / speed
-_C_YELLOW = 93     # 进度 33-66% / 非 FATAL 警告
-_C_CYAN = 96       # frame / fps / spinner
-_C_BOLD = 1
 
 _BAR_LEN = 20
 _BAR_FILLED = "█"
 _BAR_EMPTY = "░"
 _SPINNER_FRAMES = "|/-\\"
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _colors_enabled() -> bool:
-    if os.environ.get("NO_COLOR"):
-        return False
-    try:
-        return bool(sys.stdout.isatty())
-    except (AttributeError, ValueError):
-        return False
-
-
-def _color(text: str, code: int, bold: bool = False) -> str:
-    """用 ANSI 给文本染色；非 TTY 或 NO_COLOR 时返回原文。"""
-    if not _colors_enabled():
-        return text
-    if bold:
-        return f"\x1b[{_C_BOLD};{code}m{text}\x1b[0m"
-    return f"\x1b[{code}m{text}\x1b[0m"
-
-
-def _visible_len(s: str) -> int:
-    return len(_ANSI_RE.sub("", s))
 
 
 def _parse_ffmpeg_time_to_seconds(t: str):

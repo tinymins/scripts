@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .duration import _effective_end
+from . import console
 from .naming import (
     _basename,
     _mp4_name_for_transport_stream,
@@ -39,7 +40,7 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
     final_groups = []
 
     for series_index, video_series in enumerate(video_camera_groups, start=1):
-        print(
+        console.detail(
             f"Grouping camera series {series_index}/{len(video_camera_groups)} "
             f"({len(video_series)} files)..."
         )
@@ -100,9 +101,10 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
             time_grouped.append(current_group)
 
         if broken_files:
-            print(
-                f"  ⛔ 已剔除 {len(broken_files)} 个 broken 文件作为分组断点："
-                f"e.g. {_basename(broken_files[0])}"
+            console.warn(
+                f"已剔除 {len(broken_files)} 个 broken 文件作为分组断点："
+                f"e.g. {_basename(broken_files[0])}",
+                indent=2,
             )
 
         final_groups.extend(time_grouped)
