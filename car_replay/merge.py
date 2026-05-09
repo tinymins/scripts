@@ -27,7 +27,7 @@ def _write_concat_list(concat_list_path, video_group):
             f.write(_concat_file_line(video))
 
 
-def _copy_merge_videos(video_group, combined_file):
+def _copy_merge_videos(video_group, combined_file, verbose_ffmpeg=False):
     """直接 stream-copy concat 合并；失败抛 CalledProcessError。"""
     concat_list_path = combined_file + ".concat_list.txt"
     _write_concat_list(concat_list_path, video_group)
@@ -41,7 +41,9 @@ def _copy_merge_videos(video_group, combined_file):
             "-movflags", "+faststart",
             combined_file,
         ]
-        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(command, mode="concat_copy")
+        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
+            command, mode="concat_copy", verbose=verbose_ffmpeg,
+        )
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
         return elapsed, tracker
@@ -107,7 +109,7 @@ def _concat_copy_fallback(
     video_group, combined_file, *,
     expected_duration=None, warning_collector=None,
     duration_resolver=None, allow_recover=True,
-    was_fallback=False,
+    was_fallback=False, verbose_ffmpeg=False,
 ):
     """concat copy + post_validate；失败时按 broken 二次切组重试一次。
 
@@ -116,7 +118,8 @@ def _concat_copy_fallback(
     """
     elapsed, tracker, run_ok = 0.0, None, False
     try:
-        elapsed, tracker = _copy_merge_videos(video_group, combined_file)
+        elapsed, tracker = _copy_merge_videos(video_group, combined_file,
+                                              verbose_ffmpeg=verbose_ffmpeg)
         run_ok = True
     except subprocess.CalledProcessError as exc:
         print(f"  ERROR: concat copy failed (rc={exc.returncode})")
@@ -189,6 +192,7 @@ def _concat_copy_fallback(
             duration_resolver=duration_resolver,
             allow_recover=False,
             was_fallback=was_fallback,
+            verbose_ffmpeg=verbose_ffmpeg,
         )
         any_success = any_success or ok
 
@@ -198,7 +202,8 @@ def _concat_copy_fallback(
 
 
 def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None,
-                 warning_collector=None, duration_resolver=None):
+                 warning_collector=None, duration_resolver=None,
+                 verbose_ffmpeg=False):
     last_video_stats = os.stat(video_group[-1])
     last_access_time, last_mod_time = last_video_stats.st_atime, last_video_stats.st_mtime
     camera_id = extract_camera_id(_basename(video_group[0]))
@@ -218,6 +223,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         success, in_sz, out_sz, elapsed, tracker = compress_video(
             video_group[0], combined_file, camera_id, cq_override,
             expected_duration=single_dur,
+            verbose_ffmpeg=verbose_ffmpeg,
         )
         if success:
             if warning_collector is not None and tracker is not None:
@@ -243,6 +249,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             expected_duration=_sum_durations(video_group, duration_resolver),
             warning_collector=warning_collector, duration_resolver=duration_resolver,
             was_fallback=True,
+            verbose_ffmpeg=verbose_ffmpeg,
         )
         if ok:
             os.utime(combined_file, (last_access_time, last_mod_time))
@@ -286,7 +293,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         ]
 
         print(f"  CMD: {' '.join(cmd)}")
-        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd)
+        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd, verbose=verbose_ffmpeg)
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
 
@@ -303,6 +310,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
                 video_group, combined_file, expected_duration=expected_duration,
                 warning_collector=warning_collector, duration_resolver=duration_resolver,
                 was_fallback=True,
+                verbose_ffmpeg=verbose_ffmpeg,
             )
             if ok:
                 os.utime(combined_file, (last_access_time, last_mod_time))
@@ -329,6 +337,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         video_group, combined_file,
         expected_duration=_sum_durations(video_group, duration_resolver),
         warning_collector=warning_collector, duration_resolver=duration_resolver,
+        verbose_ffmpeg=verbose_ffmpeg,
     )
     if ok:
         print("Merge complete.")

@@ -10,7 +10,7 @@ from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 
 
 def compress_video(input_path, output_path, camera_id, cq_override=None,
-                   expected_duration=None):
+                   expected_duration=None, verbose_ffmpeg=False):
     """
     使用 hevc_nvenc 压缩视频文件。
     input_path: 输入文件（合并后的临时文件或单个源文件）
@@ -53,7 +53,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
 
     print(f"  CMD: {' '.join(cmd)}")
 
-    returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd)
+    returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(cmd, verbose=verbose_ffmpeg)
 
     result = CommandResult(
         returncode=returncode, elapsed=elapsed, tracker=tracker,

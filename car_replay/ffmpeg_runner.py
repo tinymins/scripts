@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -64,17 +65,27 @@ class WarningTracker:
         self.was_fallback = False
 
     def feed(self, line):
+        """喂入一行 ffmpeg stderr，更新计数。
+
+        Returns (matched, was_unmatched_error)：
+          matched=True 表示命中 14 类已知警告之一（调用方应静默该行）
+          was_unmatched_error=True 表示未命中已知模式但形似错误日志
+            （包含 'error' + '@' 且不是进度行；调用方应原样可见地打印）
+          二者都为 False 则该行是噪声（banner/stream 元信息等），调用方静默即可。
+        """
         stripped = line.rstrip("\r\n")
         if not stripped:
-            return
+            return (False, False)
         for key, pattern in WARNING_PATTERNS:
             if pattern.search(stripped):
                 self.counts[key] += 1
                 if key not in self.first_examples:
                     self.first_examples[key] = stripped[:240]
-                return
+                return (True, False)
         if "error" in stripped.lower() and "@" in stripped and "frame=" not in stripped:
             self.unmatched_error_lines += 1
+            return (False, True)
+        return (False, False)
 
     @property
     def total_warnings(self):
@@ -146,11 +157,35 @@ class WarningTracker:
         return "\n".join(lines)
 
 
-def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress"):
-    """运行 ffmpeg，实时把 stderr 透传到控制台并归类警告。
+_PROGRESS_FIELD_RES = {
+    "frame": re.compile(r"frame=\s*(\d+)"),
+    "fps": re.compile(r"fps=\s*([\d.]+)"),
+    "time": re.compile(r"time=\s*([\d:.NA/-]+)"),
+    "bitrate": re.compile(r"bitrate=\s*([\d.]+\s*\S*|N/A)"),
+    "speed": re.compile(r"speed=\s*([\d.]+x|N/A)"),
+}
 
+
+def _is_progress_line(line: str) -> bool:
+    """ffmpeg 自身的进度刷新行：典型形如
+    ``frame=  123 fps= 30 q=28.0 size=...kB time=00:00:41 bitrate=...kbits/s speed=1.2x``。
+    要求同时包含 time= 与 speed= 以避开误伤其它含 frame= 的诊断行。
+    """
+    return ("time=" in line and "speed=" in line
+            and ("frame=" in line or "size=" in line))
+
+
+def _format_elapsed(seconds: float) -> str:
+    mm, ss = divmod(int(seconds), 60)
+    return f"{mm:02d}:{ss:02d}"
+
+
+def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False):
+    """运行 ffmpeg，实时归类 stderr 警告并以单行覆盖式打印进度。
+
+    verbose=True 时退化为老行为（每行原样透传），用于排障。
     返回 (returncode, elapsed_seconds, tracker)。
-    mode 透传给 WarningTracker，用于决定 is_suspicious() 阈值口径。
+    mode 透传给 WarningTracker。
     """
     tracker = WarningTracker(mode=mode)
     start = time.time()
@@ -158,19 +193,127 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress"):
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        bufsize=1,
-        universal_newlines=True,
-        encoding="utf-8",
-        errors="replace",
+        bufsize=0,
     )
     assert proc.stderr is not None
-    try:
-        for raw_line in proc.stderr:
-            sys.stderr.write(raw_line)
+    fd = proc.stderr.fileno()
+
+    is_tty = sys.stdout.isatty()
+    state = {
+        "last_flush": 0.0,
+        "last_line_len": 0,
+        "feed_count_since_flush": 0,
+        "any_progress": False,
+    }
+    progress = {}  # type: dict
+
+    def render_status(force: bool = False) -> None:
+        elapsed_s = time.time() - start
+        parts = [f"[{_format_elapsed(elapsed_s)}]"]
+        if state["any_progress"]:
+            for k in ("frame", "fps", "time", "bitrate", "speed"):
+                v = progress.get(k, "?")
+                parts.append(f"{k}={v}")
+        nonzero = [(k, c) for k, c in tracker.counts.items() if c > 0]
+        nonzero.sort(key=lambda x: -x[1])
+        if nonzero or tracker.unmatched_error_lines:
+            parts.append("|")
+            shown = nonzero[:5]
+            for k, c in shown:
+                parts.append(f"{k}={c}")
+            if len(nonzero) > 5:
+                parts.append("...")
+            if tracker.unmatched_error_lines:
+                parts.append(f"err_lines={tracker.unmatched_error_lines}")
+        line = " ".join(parts)
+        if is_tty:
+            pad = max(state["last_line_len"] - len(line), 0)
+            sys.stdout.write("\r" + line + (" " * pad))
+            sys.stdout.flush()
+            state["last_line_len"] = len(line)
+        else:
+            # 非 TTY：每次直接换行打印；force=False 时仍按节流频率
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        state["last_flush"] = time.time()
+        state["feed_count_since_flush"] = 0
+
+    def clear_status_line() -> None:
+        if is_tty and state["last_line_len"]:
+            sys.stdout.write("\r" + (" " * state["last_line_len"]) + "\r")
+            sys.stdout.flush()
+            state["last_line_len"] = 0
+
+    def maybe_flush() -> None:
+        now = time.time()
+        if (now - state["last_flush"] >= 1.0
+                or state["feed_count_since_flush"] >= 50):
+            render_status()
+
+    def handle_line(raw: str) -> None:
+        line = raw.rstrip("\r\n")
+        if not line:
+            return
+        if verbose:
+            sys.stderr.write(line + "\n")
             sys.stderr.flush()
-            tracker.feed(raw_line)
+            if not _is_progress_line(line):
+                tracker.feed(line)
+            return
+        if _is_progress_line(line):
+            for k, regex in _PROGRESS_FIELD_RES.items():
+                m = regex.search(line)
+                if m:
+                    progress[k] = m.group(1).strip()
+            state["any_progress"] = True
+            state["feed_count_since_flush"] += 1
+            maybe_flush()
+            return
+        matched, was_err = tracker.feed(line)
+        state["feed_count_since_flush"] += 1
+        if was_err and not matched:
+            clear_status_line()
+            print(line)
+        # matched 或纯噪声：静默
+        maybe_flush()
+
+    # 字符级读取 + 按 \r 或 \n 切片，确保 ffmpeg 用 \r 自刷的进度行能独立成"行"
+    buf = bytearray()
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            while True:
+                i_n = buf.find(b"\n")
+                i_r = buf.find(b"\r")
+                if i_n == -1 and i_r == -1:
+                    break
+                if i_n == -1:
+                    i = i_r
+                elif i_r == -1:
+                    i = i_n
+                else:
+                    i = min(i_n, i_r)
+                line_bytes = bytes(buf[:i])
+                del buf[:i + 1]
+                handle_line(line_bytes.decode("utf-8", "replace"))
     finally:
         proc.wait()
+        if buf:
+            handle_line(bytes(buf).decode("utf-8", "replace"))
+        if not verbose:
+            clear_status_line()
+            elapsed_s = time.time() - start
+            summary_summary = tracker.format_oneline()
+            print(
+                f"[{_format_elapsed(elapsed_s)}] ffmpeg done "
+                f"rc={proc.returncode} | {summary_summary}"
+            )
     elapsed = time.time() - start
     return proc.returncode, elapsed, tracker
 

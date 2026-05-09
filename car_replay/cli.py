@@ -89,6 +89,11 @@ def main():
         action="store_true",
         help="跳过整体损坏文件健康探测（快速但可能漏识别坏文件）",
     )
+    parser.add_argument(
+        "--verbose-ffmpeg",
+        action="store_true",
+        help="原样透传 ffmpeg stderr（关闭单行覆盖式进度，用于排障）",
+    )
     args = parser.parse_args()
 
     if args.no_windows_metadata_duration:
@@ -166,5 +171,6 @@ def main():
         args.max_gap_seconds,
         duration_resolver,
         broken_split=not args.no_broken_split,
+        verbose_ffmpeg=args.verbose_ffmpeg,
     )
     _pause_before_exit()

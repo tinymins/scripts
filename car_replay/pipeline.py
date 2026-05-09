@@ -32,6 +32,7 @@ def process_videos_in_folder(
     max_gap_seconds=None,
     duration_resolver=None,
     broken_split=True,
+    verbose_ffmpeg=False,
 ):
     video_files = []
     other_files = []
@@ -106,6 +107,7 @@ def process_videos_in_folder(
                         group, combined_file_path, enable_compress, cq_override,
                         warning_collector=warning_collector,
                         duration_resolver=duration_resolver,
+                        verbose_ffmpeg=verbose_ffmpeg,
                     )
                 except Exception as exc:  # 单组兜底，不影响后续组
                     import traceback
