@@ -13,7 +13,11 @@ from .grouping import (
 )
 from .merge import merge_videos
 from .naming import _is_video_file
-from .report import _append_master_warning_report, _write_per_file_warning_log
+from .report import (
+    _write_per_file_warning_log,
+    classify_tracker,
+    write_master_warning_report,
+)
 
 
 def check_file_exists(file_path):
@@ -147,32 +151,52 @@ def process_videos_in_folder(
 
         # ============ FFmpeg 警告汇总 ============
         if warning_collector:
-            suspicious_items = []
-            warn_items = []
-            ok_count = 0
             os.makedirs(target_folder_base, exist_ok=True)
             master_report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
-            if os.path.exists(master_report_path):
-                os.remove(master_report_path)
 
+            classified = []  # list[(output_path, tracker, category)]
+            ok_count = 0
+            suspicious_items = []
+            downgraded_items = []
+            warn_items = []
             for output_path, tracker in warning_collector:
-                severity = tracker.severity()
-                if severity == "OK":
+                category = classify_tracker(tracker)
+                if category == "OK":
                     ok_count += 1
                     continue
-                # 写每文件 .warn.log
+                classified.append((output_path, tracker, category))
                 _write_per_file_warning_log(output_path, tracker, ["(see master report)"])
-                _append_master_warning_report(target_folder_base, output_path, tracker)
-                if severity == "SUSPICIOUS":
+                if category == "SUSPICIOUS":
                     suspicious_items.append((output_path, tracker))
+                elif category == "DOWNGRADED":
+                    downgraded_items.append((output_path, tracker))
                 else:
                     warn_items.append((output_path, tracker))
+
+            # 降级总数：所有 was_fallback=True 的条目（含 OK 也算降级，因为产物从 NVENC 变成 copy）
+            downgrade_total = sum(
+                1 for _, tracker in warning_collector
+                if getattr(tracker, "was_fallback", False)
+            )
+            completed_total = processed_groups - skipped_groups - failed_groups
+            totals = {
+                "completed": completed_total,
+                "downgraded": downgrade_total,
+                "failed": failed_groups,
+            }
+
+            write_master_warning_report(
+                master_report_path, target_folder_base, classified, totals,
+            )
 
             print(f"\n{'='*70}")
             print("FFmpeg 转码警告汇总")
             print(f"{'='*70}")
+            print(f"  完成: {completed_total}  降级到 concat copy: {downgrade_total}  "
+                  f"失败: {failed_groups}")
             print(f"  干净: {ok_count}")
             print(f"  轻微警告 (WARN): {len(warn_items)}")
+            print(f"  降级 (DOWNGRADED): {len(downgraded_items)}")
             print(f"  严重 (SUSPICIOUS, 强烈建议人工检查): {len(suspicious_items)}")
             if suspicious_items:
                 print("\n  ⚠ SUSPICIOUS 文件（画面可能损坏 / 暂停）:")
@@ -180,7 +204,12 @@ def process_videos_in_folder(
                     rel = os.path.relpath(output_path, target_folder_base)
                     print(f"    - {rel}")
                     print(f"        {tracker.format_oneline()}")
-            if warn_items or suspicious_items:
+            if downgraded_items:
+                print("\n  ↓ DOWNGRADED 文件（已从 NVENC 压制降级到 concat copy 直拷）:")
+                for output_path, tracker in downgraded_items:
+                    rel = os.path.relpath(output_path, target_folder_base)
+                    print(f"    - {rel}")
+            if warn_items or suspicious_items or downgraded_items:
                 print(f"\n  详细报告: {master_report_path}")
                 print(f"  每个有警告的输出旁边还会有同名 .warn.log")
             print(f"{'='*70}")

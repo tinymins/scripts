@@ -40,12 +40,28 @@ def _run_ffprobe(path, timeout: float = 60.0) -> Tuple[Optional[float], bool]:
 
 
 class WarningTracker:
-    """逐行扫描 ffmpeg 输出，归类并计数警告 / 错误。"""
+    """逐行扫描 ffmpeg 输出，归类并计数警告 / 错误。
 
-    def __init__(self):
+    mode:
+      - 'compress': NVENC 压制阶段，时间戳类计数也算可疑
+      - 'concat_copy': 多源 stream-copy，时间戳不连续是物理常态，仅画面损坏类才算可疑
+    was_fallback:
+      仅在 mode='concat_copy' 时有意义；True 表示该 tracker 来自压制失败后降级的 concat copy。
+    """
+
+    # 真正画面损坏类（与 concat copy 时间戳噪声无关）
+    FATAL_CATEGORIES = frozenset({
+        "corrupt_frame", "concealing", "missing_ref", "missing_picture",
+        "non_existing_pps", "application_invalid", "slice_header",
+        "mb_decode", "co_located_poc", "bytestream", "decode_error",
+    })
+
+    def __init__(self, mode: str = "compress"):
         self.counts = {key: 0 for key, _ in WARNING_PATTERNS}
         self.first_examples = {}
         self.unmatched_error_lines = 0
+        self.mode = mode
+        self.was_fallback = False
 
     def feed(self, line):
         stripped = line.rstrip("\r\n")
@@ -67,10 +83,16 @@ class WarningTracker:
     UNMATCHED_ERROR_SUSPICIOUS_THRESHOLD = 50
 
     def is_suspicious(self):
-        """三档之一：命中可疑规则或 unmatched_error_lines 超过绝对阈值。"""
+        """命中可疑规则或 unmatched_error_lines 超过绝对阈值。
+
+        mode='concat_copy' 时，时间戳类（invalid_dts/nonmono_dts/guess_pts）等非画面损坏类
+        计数不计入可疑判定，因为多源直拷天然有时间戳不连续。
+        """
         if self.unmatched_error_lines > self.UNMATCHED_ERROR_SUSPICIOUS_THRESHOLD:
             return True
         for key, threshold in SUSPICIOUS_RULES.items():
+            if self.mode == "concat_copy" and key not in self.FATAL_CATEGORIES:
+                continue
             if self.counts.get(key, 0) >= threshold:
                 return True
         return False
@@ -124,12 +146,13 @@ class WarningTracker:
         return "\n".join(lines)
 
 
-def _run_ffmpeg_capturing_warnings(cmd):
+def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress"):
     """运行 ffmpeg，实时把 stderr 透传到控制台并归类警告。
 
     返回 (returncode, elapsed_seconds, tracker)。
+    mode 透传给 WarningTracker，用于决定 is_suspicious() 阈值口径。
     """
-    tracker = WarningTracker()
+    tracker = WarningTracker(mode=mode)
     start = time.time()
     proc = subprocess.Popen(
         cmd,

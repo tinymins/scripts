@@ -41,7 +41,7 @@ def _copy_merge_videos(video_group, combined_file):
             "-movflags", "+faststart",
             combined_file,
         ]
-        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(command)
+        returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(command, mode="concat_copy")
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
         return elapsed, tracker
@@ -61,6 +61,16 @@ def _sum_durations(video_group, duration_resolver):
             total += d
             has_any = True
     return total if has_any else None
+
+
+def _remove_stale_warn_log(combined_file):
+    """删除可能由前一次（已废弃）运行写下的 .warn.log，避免与新 tracker 内容混淆。"""
+    stale = combined_file + ".warn.log"
+    if os.path.exists(stale):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
 
 def _write_failure_log(combined_file, video_group, reason, duration_resolver=None):
@@ -97,9 +107,11 @@ def _concat_copy_fallback(
     video_group, combined_file, *,
     expected_duration=None, warning_collector=None,
     duration_resolver=None, allow_recover=True,
+    was_fallback=False,
 ):
     """concat copy + post_validate；失败时按 broken 二次切组重试一次。
 
+    was_fallback: True 表示这是从 NVENC 压制失败降级而来；用于在 collector 中标注 DOWNGRADED。
     返回 (ok, elapsed, tracker)。
     """
     elapsed, tracker, run_ok = 0.0, None, False
@@ -112,6 +124,7 @@ def _concat_copy_fallback(
         print(f"  ERROR: concat copy OSError: {exc}")
 
     if warning_collector is not None and tracker is not None:
+        tracker.was_fallback = was_fallback
         warning_collector.append((combined_file, tracker))
 
     fail_reason = "concat copy failed"
@@ -175,6 +188,7 @@ def _concat_copy_fallback(
             warning_collector=warning_collector,
             duration_resolver=duration_resolver,
             allow_recover=False,
+            was_fallback=was_fallback,
         )
         any_success = any_success or ok
 
@@ -205,12 +219,13 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             video_group[0], combined_file, camera_id, cq_override,
             expected_duration=single_dur,
         )
-        if warning_collector is not None and tracker is not None:
-            warning_collector.append((combined_file, tracker))
         if success:
+            if warning_collector is not None and tracker is not None:
+                warning_collector.append((combined_file, tracker))
             os.utime(combined_file, (last_access_time, last_mod_time))
             return in_sz, out_sz, elapsed
-        # 压缩失败 → 同扩展名直接 copy；否则走 _concat_copy_fallback
+        # 压缩失败 → 丢弃压制阶段 tracker；同扩展名直接 copy；否则走 _concat_copy_fallback
+        _remove_stale_warn_log(combined_file)
         print("  Compression failed, falling back to copy/remux...")
         same_ext = (os.path.splitext(video_group[0])[1].lower()
                     == os.path.splitext(combined_file)[1].lower())
@@ -227,6 +242,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             video_group, combined_file,
             expected_duration=_sum_durations(video_group, duration_resolver),
             warning_collector=warning_collector, duration_resolver=duration_resolver,
+            was_fallback=True,
         )
         if ok:
             os.utime(combined_file, (last_access_time, last_mod_time))
@@ -274,9 +290,6 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
 
-        if warning_collector is not None:
-            warning_collector.append((combined_file, tracker))
-
         result = CommandResult(returncode, elapsed, tracker, Path(temp_output), expected_duration)
         downgrade = _downgrade_reason(result)
         if downgrade:
@@ -284,14 +297,21 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             if os.path.exists(temp_output):
                 try: os.remove(temp_output)
                 except OSError: pass
+            # 丢弃压制阶段 tracker；清理可能遗留的 .warn.log
+            _remove_stale_warn_log(combined_file)
             ok, _, _ = _concat_copy_fallback(
                 video_group, combined_file, expected_duration=expected_duration,
                 warning_collector=warning_collector, duration_resolver=duration_resolver,
+                was_fallback=True,
             )
             if ok:
                 os.utime(combined_file, (last_access_time, last_mod_time))
                 return 0, 0, 0
             return input_size, 0, elapsed
+
+        # 压制成功，未降级 → 此时才把压制阶段 tracker 入 collector
+        if warning_collector is not None:
+            warning_collector.append((combined_file, tracker))
 
         if os.path.exists(combined_file):
             os.remove(combined_file)
