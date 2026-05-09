@@ -325,29 +325,27 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                     f"err_lines={tracker.unmatched_error_lines}", _C_RED, bold=True,
                 ))
         line = " ".join(parts)
-        if is_tty:
-            visible = _visible_len(line)
-            pad = max(state["last_line_len"] - visible, 0)
-            sys.stdout.write("\r" + line + (" " * pad))
-            sys.stdout.flush()
-            state["last_line_len"] = visible
-        else:
-            # 非 TTY：每次直接换行打印；force=False 时仍按节流频率
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
+        # 始终使用 \r 覆盖；非 TTY 终端通常也识别 \r（VSCode/IDE/git-bash 等 wrapper
+        # 常被识别为非 TTY 但仍支持单行覆盖）。真不识别 \r 的环境最多是字符堆叠，
+        # 不至于刷屏几十行。
+        visible = _visible_len(line)
+        pad = max(state["last_line_len"] - visible, 0)
+        sys.stdout.write("\r" + line + (" " * pad))
+        sys.stdout.flush()
+        state["last_line_len"] = visible
         state["last_flush"] = time.time()
         state["feed_count_since_flush"] = 0
 
     def clear_status_line() -> None:
-        if is_tty and state["last_line_len"]:
+        if state["last_line_len"]:
             sys.stdout.write("\r" + (" " * state["last_line_len"]) + "\r")
             sys.stdout.flush()
             state["last_line_len"] = 0
 
     def maybe_flush() -> None:
+        # 唯一节流：1s 时钟。去掉行计数触发避免高密度警告刷屏。
         now = time.time()
-        if (now - state["last_flush"] >= 1.0
-                or state["feed_count_since_flush"] >= 50):
+        if now - state["last_flush"] >= 1.0:
             render_status()
 
     def handle_line(raw: str) -> None:
