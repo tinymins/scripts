@@ -372,6 +372,9 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
         if was_err and not matched:
             clear_status_line()
             print(line)
+            # ERROR 行打断进度条后立即重绘，避免用户看到"卡住"的孤立错误行
+            render_status()
+            return
         # matched 或纯噪声：静默
         maybe_flush()
 
