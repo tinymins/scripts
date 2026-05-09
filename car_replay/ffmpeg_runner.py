@@ -208,11 +208,8 @@ def _parse_ffmpeg_time_to_seconds(t: str):
 
 
 def _percent_color(pct: float) -> int:
-    if pct < 33:
-        return _C_RED
-    if pct < 66:
-        return _C_YELLOW
-    return _C_GREEN
+    # 进度条统一用青色：百分比只是处理进度，不是健康度，按比例红/黄/绿会让 1% 看起来像出错
+    return _C_CYAN
 
 
 def _render_progress_bar(pct: float):
@@ -529,10 +526,10 @@ def _selftest():
         # 50% → 10/10 split
         plain50 = _ANSI_RE.sub("", bar50)
         assert plain50.count(_BAR_FILLED) == 10 and plain50.count(_BAR_EMPTY) == 10, plain50
-        # 颜色档位
-        assert "\x1b[91m" in bar0      # 红
-        assert "\x1b[93m" in bar50     # 黄
-        assert "\x1b[92m" in bar100    # 绿
+        # 颜色档位：进度条统一青色（不再按百分比切档）
+        assert "\x1b[96m" in bar0
+        assert "\x1b[96m" in bar50
+        assert "\x1b[96m" in bar100
 
         # ---- 3) _parse_ffmpeg_time_to_seconds ----
         assert abs(_parse_ffmpeg_time_to_seconds("00:00:50.97") - 50.97) < 1e-6
