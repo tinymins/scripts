@@ -37,7 +37,8 @@ def _video_sort_key(path):
 
 
 def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
-                         duration_resolver=None, *, broken_split=True):
+                         duration_resolver=None, *, broken_split=True,
+                         max_group_duration_seconds=None):
     final_groups = []
 
     for series_index, video_series in enumerate(video_camera_groups, start=1):
@@ -54,6 +55,7 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
         prev_video = None
         prev_info = None
         broken_files = []
+        group_start_dt = None
 
         for video in video_series:
             if broken_split and duration_resolver is not None:
@@ -68,11 +70,13 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
                         current_group = []
                     prev_video = None
                     prev_info = None
+                    group_start_dt = None
                     continue
 
             current_info = parse_video_filename(_basename(video))
             if prev_video is None:
                 current_group = [video]
+                group_start_dt = current_info.datetime
             else:
                 previous_effective_end = _effective_end(
                     prev_info, prev_video, duration_resolver,
@@ -80,6 +84,7 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
                 if not current_info.datetime or not previous_effective_end:
                     time_grouped.append(current_group)
                     current_group = [video]
+                    group_start_dt = current_info.datetime
                 else:
                     time_diff = (
                         current_info.datetime - previous_effective_end
@@ -89,12 +94,26 @@ def group_videos_by_time(video_camera_groups, max_gap_seconds=None,
                         if max_gap_seconds is not None
                         else current_info.max_time_difference
                     )
-                    if (max_time_difference is not None
-                            and time_diff <= max_time_difference):
+                    gap_ok = (
+                        max_time_difference is not None
+                        and time_diff <= max_time_difference
+                    )
+                    # 累计时长上限保护：以组首 start 到 candidate 末端衡量
+                    duration_ok = True
+                    if gap_ok and max_group_duration_seconds and group_start_dt:
+                        candidate_end = _effective_end(
+                            current_info, video, duration_resolver,
+                        ) or current_info.datetime
+                        accumulated = (candidate_end - group_start_dt).total_seconds()
+                        if accumulated > max_group_duration_seconds:
+                            duration_ok = False
+
+                    if gap_ok and duration_ok:
                         current_group.append(video)
                     else:
                         time_grouped.append(current_group)
                         current_group = [video]
+                        group_start_dt = current_info.datetime
             prev_video = video
             prev_info = current_info
 

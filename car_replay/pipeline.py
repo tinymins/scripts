@@ -36,6 +36,7 @@ def process_videos_in_folder(
     verbose_ffmpeg=False,
     verbose_cmd=False,
     monthly_subdirs="auto",
+    max_group_duration_seconds=None,
 ):
     video_files = []
     other_files = []
@@ -73,6 +74,7 @@ def process_videos_in_folder(
         grouped_videos = group_videos_by_time(
             camera_groups, max_gap_seconds, duration_resolver,
             broken_split=broken_split,
+            max_group_duration_seconds=max_group_duration_seconds,
         )
         total_groups = len(grouped_videos)
         console.kv("待处理视频组", total_groups)

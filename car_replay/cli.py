@@ -92,6 +92,12 @@ def main():
         help="跳过整体损坏文件健康探测（快速但可能漏识别坏文件）",
     )
     parser.add_argument(
+        "--max-group-duration-seconds",
+        type=int,
+        default=7200,
+        help="单个合并段的最大累计时长上限秒数 (默认 7200=2h, 0 表示不限制)",
+    )
+    parser.add_argument(
         "--monthly-subdirs",
         choices=("auto", "on", "off"),
         default="auto",
@@ -192,5 +198,8 @@ def main():
         verbose_ffmpeg=args.verbose_ffmpeg,
         verbose_cmd=args.verbose_cmd,
         monthly_subdirs=args.monthly_subdirs,
+        max_group_duration_seconds=(
+            args.max_group_duration_seconds if args.max_group_duration_seconds > 0 else None
+        ),
     )
     _pause_before_exit()
