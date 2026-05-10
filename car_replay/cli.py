@@ -92,6 +92,15 @@ def main():
         help="跳过整体损坏文件健康探测（快速但可能漏识别坏文件）",
     )
     parser.add_argument(
+        "--monthly-subdirs",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "输出按月分子目录 (<dst>/YYYYMM/...); "
+            "auto: 仅 XIAOMI_* 设备启用 (默认); on: 全部启用; off: 全部平铺"
+        ),
+    )
+    parser.add_argument(
         "--verbose-ffmpeg",
         action="store_true",
         help="原样透传 ffmpeg stderr（关闭单行覆盖式进度，用于排障）",
@@ -182,5 +191,6 @@ def main():
         broken_split=not args.no_broken_split,
         verbose_ffmpeg=args.verbose_ffmpeg,
         verbose_cmd=args.verbose_cmd,
+        monthly_subdirs=args.monthly_subdirs,
     )
     _pause_before_exit()

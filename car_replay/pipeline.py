@@ -13,7 +13,7 @@ from .grouping import (
     group_videos_by_time,
 )
 from .merge import merge_videos
-from .naming import _is_video_file
+from .naming import _is_video_file, extract_camera_key, parse_video_filename, _basename
 from .report import (
     _write_per_file_warning_log,
     classify_tracker,
@@ -35,6 +35,7 @@ def process_videos_in_folder(
     broken_split=True,
     verbose_ffmpeg=False,
     verbose_cmd=False,
+    monthly_subdirs="auto",
 ):
     video_files = []
     other_files = []
@@ -94,7 +95,24 @@ def process_videos_in_folder(
 
             # 获取原文件的相对路径
             relative_dir = os.path.dirname(os.path.relpath(first_video, src_folder))
-            target_folder = os.path.join(target_folder_base, relative_dir)
+
+            # 是否按月分子目录：auto → 仅 XIAOMI_* 设备启用；on → 全部；off → 平铺
+            use_monthly = False
+            if monthly_subdirs == "on":
+                use_monthly = True
+            elif monthly_subdirs == "auto":
+                camera_key = extract_camera_key(first_video, src_folder) or ""
+                use_monthly = camera_key.startswith("XIAOMI_")
+
+            if use_monthly:
+                first_info = parse_video_filename(_basename(first_video))
+                if first_info.datetime:
+                    yyyymm = first_info.datetime.strftime("%Y%m")
+                    target_folder = os.path.join(target_folder_base, yyyymm)
+                else:
+                    target_folder = os.path.join(target_folder_base, relative_dir)
+            else:
+                target_folder = os.path.join(target_folder_base, relative_dir)
 
             # 创建目标文件夹
             if not os.path.exists(target_folder):
