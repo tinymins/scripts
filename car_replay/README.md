@@ -45,6 +45,8 @@
 | `--probe-workers N` | **新**：ffprobe 并发线程数（默认 4） |
 | `--probe-timeout N` | **新**：单文件 ffprobe 超时秒数（默认 60） |
 | `--no-broken-split` | **新**：跳过 broken 健康探测，快速但漏检 |
+| `--monthly-subdirs auto\|on\|off` | **新**：输出按 `<dst>/YYYYMM/...` 分子目录；auto 仅对 `XIAOMI_*` 设备启用 |
+| `--max-group-duration-seconds N` | **新**：单个合并段累计时长上限 (默认 7200=2h, 0 关闭) |
 | `--no-windows-metadata-duration` | **deprecated no-op**：仅打 warning |
 | `--exact-duration-probing` | **deprecated no-op**：仅打 warning |
 
@@ -281,3 +283,45 @@ python3 -m car_replay --src "/mnt/iot/LS_S3" --compress
 ```
 
 首次跑前建议先在某一天的子目录用第 1~5 条把降级链验过一轮再放大到全目录。
+
+## 小米摄像头支持
+
+除了行车记录仪，本工具也支持小米家用摄像头的两种常见目录布局，输入端通过 `naming.py` 自动识别，输出端默认按月分子目录以避免十万级文件平铺。
+
+### 模式 A：`XiaomiCamera_NN_<MAC>/` 顶层平铺
+
+文件名：`<NN>_<开始YYYYMMDDhhmmss>_<结束YYYYMMDDhhmmss>.mp4`，例 `00_20250516070050_20250516072431.mp4`。
+
+- 起止时间均从文件名解析，**无需 ffprobe**，分组最快
+- `camera_key = XIAOMI_A:<目录名>`；多通道（NN）独立分组
+- 输出文件名：`<start>_<end>_Xiaomi_<NN>_<MAC尾4位>.mp4`
+
+### 模式 B：`xiaomi_camera_videos/<MAC>/<YYYYMMDDHH>/`（小时分桶）
+
+文件名：`<MM>M<SS>S_<unix_ts>.mp4`，例 `00M56S_1747350056.mp4`。
+
+- start = `unix_ts`；end 需 ffprobe 兜底（命中 cache 后秒过）
+- 单设备可能有 8 千+ 小时目录、数万文件 → 首次跑磁盘缓存填充耗时大，强烈建议先用单小时子目录 smoke
+- `camera_key = XIAOMI_B:<MAC>`；输出文件名：`<start>_<end>_Xiaomi_<MAC尾4位>.mp4`
+
+### 推荐 CLI（小米场景）
+
+```bash
+# 小米模式 A：单设备目录
+python3 -m car_replay --src "/mnt/iot/XiaomiCamera_00_B888801AFBCE" --compress
+
+# 小米模式 B：单小时目录先 smoke
+python3 -m car_replay \
+  --src "/mnt/iot/xiaomi_camera_videos/607ea4179a51/2025051607" --compress
+
+# 全量跑（B 模式量极大，建议加快速模式）
+python3 -m car_replay \
+  --src "/mnt/iot/xiaomi_camera_videos/607ea4179a51" --compress \
+  --no-broken-split
+```
+
+输出布局示例：`<src>_Combined/202505/20250516070050_20250516072431_Xiaomi_00_FBCE.mp4`
+
+### 编码方向
+
+监控源通常是 H.264 / AAC；本工具复用现有 `hevc_nvenc` 管线 → 输出 **H.265**，长期归档省空间。监控画面相对静态，默认 CQ 已能压得很小，未单独新增 profile。如压完过糊可用 `--cq N` 临时覆盖。
