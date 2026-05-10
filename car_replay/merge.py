@@ -251,7 +251,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             try:
                 shutil.copy2(video_group[0], combined_file)
                 os.utime(combined_file, (last_access_time, last_mod_time))
-                return 0, 0, 0
+                copied_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+                return in_sz, copied_size, elapsed
             except OSError as exc:
                 console.error(f"copy fallback failed: {exc}", indent=2)
                 _write_failure_log(combined_file, video_group, f"copy: {exc}", duration_resolver)
@@ -266,7 +267,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         )
         if ok:
             os.utime(combined_file, (last_access_time, last_mod_time))
-            return 0, 0, 0
+            out_sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+            return in_sz, out_sz, elapsed
         return in_sz, 0, elapsed
 
     if (len(video_group) == 1 and not enable_compress
@@ -275,7 +277,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         console.step(f"Copying single file: {_basename(video_group[0])}")
         console.detail(f"→ {combined_file}")
         shutil.copy2(video_group[0], combined_file)
-        return 0, 0, 0
+        sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+        return sz, sz, 0
 
     console.step(f"Merging {len(video_group)} files into {_basename(combined_file)}")
     console.list_items(
@@ -338,7 +341,9 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             )
             if ok:
                 os.utime(combined_file, (last_access_time, last_mod_time))
-                return 0, 0, 0
+                # 降级也算实绩：返回真实 input / output / elapsed
+                output_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+                return input_size, output_size, elapsed
             return input_size, 0, elapsed
 
         # 压制成功，未降级 → 此时才把压制阶段 tracker 入 collector
@@ -370,6 +375,9 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     if ok:
         console.success("Merge complete.", indent=2)
         os.utime(combined_file, (last_access_time, last_mod_time))
-    else:
-        console.error("Merge failed (see .failure.log).", indent=2)
-    return 0, 0, 0
+        in_sz = sum(os.path.getsize(v) for v in video_group if os.path.exists(v))
+        out_sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+        return in_sz, out_sz, 0
+    console.error("Merge failed (see .failure.log).", indent=2)
+    in_sz = sum(os.path.getsize(v) for v in video_group if os.path.exists(v))
+    return in_sz, 0, 0
