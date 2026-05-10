@@ -11,6 +11,7 @@ from .naming import (
     _mp4_name_for_transport_stream,
     extract_camera_key,
     parse_video_filename,
+    xiaomi_rest_for_path,
 )
 
 
@@ -130,4 +131,6 @@ def create_combined_filename(first_video, last_video, duration_resolver=None):
         last_effective_end = last_info.datetime
     last_timestamp = last_effective_end.strftime("%Y%m%d%H%M%S")
 
-    return f"{first_timestamp}_{last_timestamp}_{_mp4_name_for_transport_stream(first_info.rest_of_filename)}"
+    rest = xiaomi_rest_for_path(first_video, first_info)
+    rest = _mp4_name_for_transport_stream(rest)
+    return f"{first_timestamp}_{last_timestamp}_{rest}"

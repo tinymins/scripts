@@ -88,6 +88,30 @@ def parse_video_filename(filename):
             camera_key="LS_S3",
         )
 
+    # 小米模式 A（顶层平铺）：NN_<开始YYYYMMDDhhmmss>_<结束YYYYMMDDhhmmss>.mp4
+    # 例：00_20250516070050_20250516072431.mp4
+    match = re.match(r"(\d{2})_(\d{14})_(\d{14})\.(?:MP4|TS)$", filename, re.IGNORECASE)
+    if match:
+        return VideoInfo(
+            datetime_obj=datetime.strptime(match.group(2), "%Y%m%d%H%M%S"),
+            end_datetime=datetime.strptime(match.group(3), "%Y%m%d%H%M%S"),
+            rest_of_filename=f"Xiaomi_{match.group(1)}.mp4",
+            max_time_difference=180,
+            camera_key="XIAOMI_A",
+        )
+
+    # 小米模式 B（按小时分桶）：MMMSS_<unix_ts>.mp4
+    # 例：00M56S_1747350056.mp4
+    match = re.match(r"\d{2}M\d{2}S_(\d{10})\.(?:MP4|TS)$", filename, re.IGNORECASE)
+    if match:
+        ts = int(match.group(1))
+        return VideoInfo(
+            datetime_obj=datetime.fromtimestamp(ts),
+            rest_of_filename="Xiaomi.mp4",
+            max_time_difference=180,
+            camera_key="XIAOMI_B",
+        )
+
     return VideoInfo()
 
 
@@ -139,6 +163,12 @@ def _infer_device_key(path, src_folder=None):
     for part in components:
         if re.match(r"LS_[A-Za-z0-9_]+$", part, re.IGNORECASE):
             return part.upper()
+        # 小米模式 A 顶层目录：XiaomiCamera_NN_<MAC>
+        if re.match(r"XiaomiCamera_\d{2}_[0-9A-Fa-f]{12}$", part):
+            return part
+        # 小米模式 B MAC 子目录（12 位十六进制）
+        if re.match(r"^[0-9a-fA-F]{12}$", part):
+            return part.lower()
 
     if src_folder:
         try:
@@ -164,3 +194,24 @@ def extract_camera_key(video_path, src_folder=None):
         return f"{info.camera_key}:{_infer_device_key(video_path, src_folder)}"
 
     return None
+
+
+def xiaomi_rest_for_path(video_path, info):
+    """根据路径上下文为小米模式 A/B 生成 rest_of_filename，附带设备短标识。"""
+    if info.camera_key not in ("XIAOMI_A", "XIAOMI_B"):
+        return info.rest_of_filename
+
+    components = _path_components(video_path)
+    if info.camera_key == "XIAOMI_A":
+        # 期望路径上有 XiaomiCamera_NN_<MAC>；文件名已带 NN
+        for part in components:
+            m = re.match(r"XiaomiCamera_(\d{2})_([0-9A-Fa-f]{12})$", part)
+            if m:
+                return f"Xiaomi_{m.group(1)}_{m.group(2)[-4:].upper()}.mp4"
+        return info.rest_of_filename
+
+    # XIAOMI_B
+    for part in components:
+        if re.match(r"^[0-9a-fA-F]{12}$", part):
+            return f"Xiaomi_{part[-4:].upper()}.mp4"
+    return info.rest_of_filename
