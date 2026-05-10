@@ -128,6 +128,26 @@ def kv(label: str, value, indent: int = 2) -> None:
     print(f"{pad}{label_s} {value}")
 
 
+def copy_line(path: str, idx: int = 0, total: int = 0, action: str = "copy",
+              indent: int = 2) -> None:
+    """文件复制 / 跳过的单行染色输出。
+
+    action='copy' → 绿色 + 箭头；action='skip' → 灰色 + ·
+    带计数前缀 [i/total]（gray）。
+    """
+    pad = " " * indent
+    counter = ""
+    if total:
+        counter = _color(f"[{idx}/{total}] ", _C_GRAY)
+    if action == "skip":
+        icon = _color("·", _C_GRAY)
+        body = _color(path, _C_GRAY) + _color(" (已存在)", _C_GRAY)
+    else:
+        icon = _color("→", _C_GREEN, bold=True)
+        body = _color(path, _C_CYAN)
+    print(f"{pad}{counter}{icon} {body}")
+
+
 def kvtable(rows: Sequence[Tuple[str, object]], indent: int = 2) -> None:
     """多行对齐 kv 表格。"""
     if not rows:

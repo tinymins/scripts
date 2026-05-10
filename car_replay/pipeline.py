@@ -164,98 +164,97 @@ def process_videos_in_folder(
             rows.append(("压缩总耗时", elapsed_str))
         console.kvtable(rows)
 
-        # ============ FFmpeg 警告汇总 ============
-        if warning_collector:
-            os.makedirs(target_folder_base, exist_ok=True)
-            master_report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
-
-            classified = []  # list[(output_path, tracker, category)]
-            ok_count = 0
-            suspicious_items = []
-            downgraded_items = []
-            warn_items = []
-            for output_path, tracker in warning_collector:
-                category = classify_tracker(tracker)
-                if category == "OK":
-                    ok_count += 1
-                    continue
-                classified.append((output_path, tracker, category))
-                _write_per_file_warning_log(output_path, tracker, ["(see master report)"])
-                if category == "SUSPICIOUS":
-                    suspicious_items.append((output_path, tracker))
-                elif category == "DOWNGRADED":
-                    downgraded_items.append((output_path, tracker))
-                else:
-                    warn_items.append((output_path, tracker))
-
-            # 降级总数：所有 was_fallback=True 的条目（含 OK 也算降级，因为产物从 NVENC 变成 copy）
-            downgrade_total = sum(
-                1 for _, tracker in warning_collector
-                if getattr(tracker, "was_fallback", False)
-            )
-            completed_total = processed_groups - skipped_groups - failed_groups
-            totals = {
-                "completed": completed_total,
-                "downgraded": downgrade_total,
-                "failed": failed_groups,
-            }
-
-            write_master_warning_report(
-                master_report_path, target_folder_base, classified, totals,
-            )
-
-            console.section("FFmpeg 转码警告汇总")
-            console.kvtable([
-                ("完成", completed_total),
-                ("降级到 concat copy", downgrade_total),
-                ("失败", failed_groups),
-                ("干净", ok_count),
-                ("轻微警告 (WARN)", len(warn_items)),
-                ("降级 (DOWNGRADED)", len(downgraded_items)),
-                ("严重 (SUSPICIOUS)", len(suspicious_items)),
-            ])
-            if suspicious_items:
-                console.warn("SUSPICIOUS 文件（画面可能损坏 / 暂停）:", indent=2)
-                for output_path, tracker in suspicious_items:
-                    rel = os.path.relpath(output_path, target_folder_base)
-                    console.detail(f"- {rel}", indent=4)
-                    console.detail(tracker.format_oneline(), indent=8)
-            if downgraded_items:
-                console.info("")
-                console.detail("↓ DOWNGRADED 文件（已从 NVENC 压制降级到 concat copy 直拷）:")
-                for output_path, tracker in downgraded_items:
-                    rel = os.path.relpath(output_path, target_folder_base)
-                    console.detail(f"- {rel}", indent=4)
-            if warn_items or suspicious_items or downgraded_items:
-                console.kv("详细报告", master_report_path)
-                console.detail("每个有警告的输出旁边还会有同名 .warn.log")
-
-    # 处理其他类型文件
+    # 处理其他类型文件（必须在写汇总报告之前完成，避免几百个 copy 行刷掉报告）
     if other_files:
-        console.section("Processing other file types")
+        console.section(f"Processing other file types ({len(other_files)} files)")
         copied_count = 0
         skipped_count = 0
+        total = len(other_files)
 
-        for file_path in other_files:
+        for idx, file_path in enumerate(other_files, 1):
             relative_path = os.path.relpath(file_path, src_folder)
             target_file_path = os.path.join(target_folder_base, relative_path)
             target_dir = os.path.dirname(target_file_path)
 
-            # 确保目标目录存在
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir)
 
             if not check_file_exists(target_file_path):
-                console.detail(f"Copying: {relative_path}")
+                console.copy_line(relative_path, idx=idx, total=total, action="copy")
                 shutil.copy2(file_path, target_file_path)
                 copied_count += 1
             else:
-                console.detail(f"Already exists, skipping: {relative_path}")
+                console.copy_line(relative_path, idx=idx, total=total, action="skip")
                 skipped_count += 1
 
         console.kvtable([
             ("已复制", copied_count),
             ("已跳过", skipped_count),
         ])
+
+    # ============ FFmpeg 警告汇总（最后输出，避免被 copy 行刷掉）============
+    if warning_collector:
+        os.makedirs(target_folder_base, exist_ok=True)
+        master_report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
+
+        classified = []
+        ok_count = 0
+        suspicious_items = []
+        downgraded_items = []
+        warn_items = []
+        for output_path, tracker in warning_collector:
+            category = classify_tracker(tracker)
+            if category == "OK":
+                ok_count += 1
+                continue
+            classified.append((output_path, tracker, category))
+            _write_per_file_warning_log(output_path, tracker, ["(see master report)"])
+            if category == "SUSPICIOUS":
+                suspicious_items.append((output_path, tracker))
+            elif category == "DOWNGRADED":
+                downgraded_items.append((output_path, tracker))
+            else:
+                warn_items.append((output_path, tracker))
+
+        downgrade_total = sum(
+            1 for _, tracker in warning_collector
+            if getattr(tracker, "was_fallback", False)
+        )
+        completed_total = processed_groups - skipped_groups - failed_groups
+        totals = {
+            "completed": completed_total,
+            "downgraded": downgrade_total,
+            "failed": failed_groups,
+        }
+
+        write_master_warning_report(
+            master_report_path, target_folder_base, classified, totals,
+        )
+
+        console.section("FFmpeg 转码警告汇总")
+        console.kvtable([
+            ("完成", completed_total),
+            ("降级到 concat copy", downgrade_total),
+            ("失败", failed_groups),
+            ("干净", ok_count),
+            ("轻微警告 (WARN)", len(warn_items)),
+            ("降级 (DOWNGRADED)", len(downgraded_items)),
+            ("严重 (SUSPICIOUS)", len(suspicious_items)),
+        ])
+        if suspicious_items:
+            console.warn("SUSPICIOUS 文件（画面可能损坏 / 暂停）:", indent=2)
+            for output_path, tracker in suspicious_items:
+                rel = os.path.relpath(output_path, target_folder_base)
+                console.detail(f"- {rel}", indent=4)
+                console.detail(tracker.format_oneline(), indent=8)
+        if downgraded_items:
+            console.info("")
+            console.detail("↓ DOWNGRADED 文件（已从 NVENC 压制降级到 concat copy 直拷）:")
+            for output_path, tracker in downgraded_items:
+                rel = os.path.relpath(output_path, target_folder_base)
+                console.detail(f"- {rel}", indent=4)
+        if warn_items or suspicious_items or downgraded_items:
+            console.kv("详细报告", master_report_path)
+            console.detail("每个有警告的输出旁边还会有同名 .warn.log")
 
     console.success("All processing completed successfully!")
