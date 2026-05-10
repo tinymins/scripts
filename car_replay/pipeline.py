@@ -37,6 +37,8 @@ def process_videos_in_folder(
     verbose_cmd=False,
     monthly_subdirs="auto",
     max_group_duration_seconds=None,
+    dry_run=False,
+    overwrite=False,
 ):
     video_files = []
     other_files = []
@@ -65,6 +67,10 @@ def process_videos_in_folder(
     ])
 
     # 处理视频文件
+    warning_collector = []
+    processed_groups = 0
+    skipped_groups = 0
+    failed_groups = 0
     if video_files:
         # 按照摄像机ID进行初始分组
         camera_groups = group_videos_by_camera(video_files, src_folder)
@@ -79,13 +85,9 @@ def process_videos_in_folder(
         total_groups = len(grouped_videos)
         console.kv("待处理视频组", total_groups)
 
-        processed_groups = 0
-        skipped_groups = 0
-        failed_groups = 0
         total_input_size = 0
         total_output_size = 0
         total_elapsed = 0
-        warning_collector = []
 
         # 处理每个视频组
         for group in grouped_videos:
@@ -117,8 +119,9 @@ def process_videos_in_folder(
                 target_folder = os.path.join(target_folder_base, relative_dir)
 
             # 创建目标文件夹
-            if not os.path.exists(target_folder):
-                os.makedirs(target_folder)
+            if not dry_run:
+                if not os.path.exists(target_folder):
+                    os.makedirs(target_folder)
 
             # 构建输出文件名 - 使用新的命名格式
             combined_file_name = create_combined_filename(first_video, last_video, duration_resolver)
@@ -129,7 +132,25 @@ def process_videos_in_folder(
             )
             console.kv("Files in group", len(group))
 
-            if not check_file_exists(combined_file_path):
+            exists = check_file_exists(combined_file_path)
+            should_process = (not exists) or overwrite
+
+            if dry_run:
+                action = "WOULD overwrite" if (exists and overwrite) else (
+                    "WOULD skip (exists)" if exists else "WOULD merge"
+                )
+                console.detail(f"[dry-run] {action}: {combined_file_path}", indent=2)
+                if should_process:
+                    sample = group[:3]
+                    for s in sample:
+                        console.detail(f"  ↪ {os.path.relpath(s, src_folder)}", indent=4)
+                    if len(group) > 3:
+                        console.detail(f"  ↪ … (+{len(group)-3} more)", indent=4)
+                else:
+                    skipped_groups += 1
+                continue
+
+            if should_process:
                 try:
                     in_sz, out_sz, elapsed = merge_videos(
                         group, combined_file_path, enable_compress, cq_override,
@@ -196,10 +217,23 @@ def process_videos_in_folder(
             target_file_path = os.path.join(target_folder_base, relative_path)
             target_dir = os.path.dirname(target_file_path)
 
+            exists = check_file_exists(target_file_path)
+            if dry_run:
+                if exists and overwrite:
+                    console.detail(
+                        f"[dry-run] WOULD overwrite [{idx}/{total}] {relative_path}",
+                        indent=2,
+                    )
+                elif exists:
+                    console.copy_line(relative_path, idx=idx, total=total, action="skip")
+                else:
+                    console.copy_line(relative_path, idx=idx, total=total, action="copy")
+                continue
+
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir)
 
-            if not check_file_exists(target_file_path):
+            if (not exists) or overwrite:
                 console.copy_line(relative_path, idx=idx, total=total, action="copy")
                 shutil.copy2(file_path, target_file_path)
                 copied_count += 1
@@ -213,7 +247,7 @@ def process_videos_in_folder(
         ])
 
     # ============ FFmpeg 警告汇总（最后输出，避免被 copy 行刷掉）============
-    if warning_collector:
+    if warning_collector and not dry_run:
         os.makedirs(target_folder_base, exist_ok=True)
         master_report_path = os.path.join(target_folder_base, "_transcode_warnings.txt")
 
@@ -277,4 +311,7 @@ def process_videos_in_folder(
             console.kv("详细报告", master_report_path)
             console.detail("每个有警告的输出旁边还会有同名 .warn.log")
 
-    console.success("All processing completed successfully!")
+    if dry_run:
+        console.success(f"Dry-run complete (no changes written under {target_folder_base})")
+    else:
+        console.success("All processing completed successfully!")

@@ -92,6 +92,16 @@ def main():
         help="跳过整体损坏文件健康探测（快速但可能漏识别坏文件）",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="仅打印将要执行的动作 (不调 ffmpeg / 不创建目录 / 不复制 / 不写报告)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="覆盖已存在的合并产物 / 已存在的非视频文件 (dry-run 下仅打印 WOULD overwrite)",
+    )
+    parser.add_argument(
         "--max-group-duration-seconds",
         type=int,
         default=7200,
@@ -201,5 +211,7 @@ def main():
         max_group_duration_seconds=(
             args.max_group_duration_seconds if args.max_group_duration_seconds > 0 else None
         ),
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
     )
     _pause_before_exit()
