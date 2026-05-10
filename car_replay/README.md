@@ -40,7 +40,7 @@
 | `--no-ffprobe-duration` | 禁用时长探测，仅用文件名 + 兜底值 |
 | `--no-hybrid` | 禁用混合模式（坏输入也强压 NVENC） |
 | `--allow-combined-input` | 允许从含 `_Combined` 的目录读取 |
-| `--cache-dir PATH` | **新**：覆盖默认缓存目录 `<src>/.car_replay_cache` |
+| `--cache-dir PATH` | **新**：覆盖默认缓存目录 `<repo>/.data/car_replay` |
 | `--no-cache` | **新**：禁用磁盘缓存（调试用） |
 | `--probe-workers N` | **新**：ffprobe 并发线程数（默认 4） |
 | `--probe-timeout N` | **新**：单文件 ffprobe 超时秒数（默认 60） |
@@ -141,7 +141,7 @@ flowchart TD
 
 ## 缓存机制
 
-- 路径：默认 `<src>/.car_replay_cache/cache.json`，可被 `--cache-dir` 覆盖
+- 路径：默认 `<repo>/.data/car_replay/cache.json`，可被 `--cache-dir` 覆盖
 - key：`os.path.normcase(os.path.abspath(path))`
 - fingerprint：`(size, mtime_ns, ctime_ns)`，任一变 → 失效重 probe
 - entry：`{duration, source, health: {healthy, broken, probed_at}}`
@@ -170,7 +170,7 @@ flowchart TD
 | 路径归一化 | `os.path.normcase`（盘符大小写 + UNC） | `os.path.normcase`（POSIX 不变） |
 | NVENC | 通常可用 | 视驱动而定，不可用自动走 fallback |
 
-跨平台 cache key 不互通（normcase 后的形态不同），各平台维护各自的 `.car_replay_cache/`。
+跨平台 cache key 不互通（normcase 后的形态不同），各平台维护各自的 `<repo>/.data/car_replay/`。
 
 ## 已删的历史包袱
 
@@ -219,7 +219,7 @@ Linux / WSL：
 python3 -m car_replay --src "/mnt/iot/LS_S3/<选一天>" --compress --no-broken-split
 ```
 
-对比第 1 条首次耗时（清空 `.car_replay_cache/` 后再跑以保证公平）。
+对比第 1 条首次耗时（清空 `<repo>/.data/car_replay/` 后再跑以保证公平）。
 
 ### 4. 制造损坏文件验证 broken 断点
 

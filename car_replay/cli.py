@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from . import console
 from .duration import DurationResolver
@@ -66,7 +67,7 @@ def main():
         "--cache-dir",
         type=str,
         default=None,
-        help="时长/健康缓存目录（默认 <src>/.car_replay_cache）",
+        help="时长/健康缓存目录（默认 <repo>/.data/car_replay）",
     )
     parser.add_argument(
         "--no-cache",
@@ -153,7 +154,9 @@ def main():
     if args.cache_dir:
         cache_path = os.path.join(args.cache_dir, "cache.json")
     else:
-        cache_path = os.path.join(src_folder, ".car_replay_cache", "cache.json")
+        # 默认存到 repo 的 .data/car_replay/，避免污染源目录
+        repo_root = Path(__file__).resolve().parent.parent
+        cache_path = str(repo_root / ".data" / "car_replay" / "cache.json")
 
     duration_resolver = DurationResolver(
         enabled=not args.no_ffprobe_duration,

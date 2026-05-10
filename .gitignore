@@ -1,4 +1,5 @@
 /.vendor/
 /.cache/
+/.data/
 __pycache__/
 *.log
