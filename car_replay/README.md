@@ -4,7 +4,7 @@
 
 ## 概述
 
-原 `combine_car_replay.py` 单文件 1300+ 行，混了 PowerShell 元数据读取、自适应抽样分治填时长、两个旁支脚本，难维护。本次拆成 12 个职责单一的模块，并落地 3 项稳定性补丁：
+原 `combine_car_replay.py` 单文件 1300+ 行，混了 PowerShell 元数据读取、自适应抽样分治填时长、两个旁支脚本，难维护。本次拆成 13 个职责单一的模块，并落地 4 项稳定性补丁：
 
 - **磁盘缓存**：几万文件首次跑慢、二次跑秒过
 - **broken 断点**：整文件损坏的源作为时间分组断点并自身丢弃
@@ -48,38 +48,50 @@
 | `--no-broken-split` | **新**：跳过 broken 健康探测，快速但漏检 |
 | `--monthly-subdirs auto\|on\|off` | **新**：输出按 `<dst>/YYYYMM/...` 分子目录；auto 仅对 `XIAOMI_*` 设备启用 |
 | `--max-group-duration-seconds N` | **新**：单个合并段累计时长上限 (默认 7200=2h, 0 关闭) |
+| `--dry-run` | 仅打印将要执行的动作（不调 ffmpeg / 不创建目录 / 不写报告） |
+| `--overwrite` | 覆盖已存在的合并产物 / 已存在的非视频文件 |
+| `--verbose-ffmpeg` | 原样透传 ffmpeg stderr（关闭进度行覆盖渲染，排障用） |
+| `--verbose-cmd` | 完整打印 ffmpeg 命令行 + 文件列表（默认折叠） |
 | `--no-windows-metadata-duration` | **deprecated no-op**：仅打 warning |
 | `--exact-duration-probing` | **deprecated no-op**：仅打 warning |
 
 ## 架构
 
-12 个模块，依赖方向严格自下而上。`report` 不参与业务流程，只接收已构造好的 tracker / result。
+13 个模块，依赖方向严格自下而上。`report` 不参与业务流程，只接收已构造好的 tracker / result。`console` 是横切的输出 helper，被多数模块引用。
 
 ```mermaid
 graph TD
   config[config]
+  console[console]
   naming[naming] --> config
   ffmpeg_runner[ffmpeg_runner] --> config
+  ffmpeg_runner --> console
   duration[duration] --> config
+  duration --> console
   duration --> naming
   duration --> ffmpeg_runner
   grouping[grouping] --> naming
   grouping --> duration
+  grouping --> console
   compress[compress] --> config
   compress --> ffmpeg_runner
+  compress --> console
   merge[merge] --> config
   merge --> naming
   merge --> ffmpeg_runner
   merge --> compress
+  merge --> console
   report[report] --> config
   report -.types.-> ffmpeg_runner
   pipeline[pipeline] --> grouping
   pipeline --> merge
   pipeline --> report
   pipeline --> duration
+  pipeline --> console
   cli[cli] --> config
   cli --> duration
   cli --> pipeline
+  cli --> console
   main[__main__] --> cli
 ```
 
@@ -87,15 +99,16 @@ graph TD
 
 | 模块 | 职责 |
 |---|---|
-| `config` | 路径常量、`COMPRESS_PROFILES`、`WARNING_PATTERNS`、`resolve_executable` |
+| `config` | 路径常量、`COMPRESS_PROFILES`、`WARNING_PATTERNS`、负压缩阈值、`resolve_executable` |
+| `console` | 集中染色 / 排版 helper；ffmpeg 进度行渲染原语；NO_COLOR + Windows VT 启用 |
 | `naming` | 5 种文件名解析 + camera_id 抽取 |
-| `ffmpeg_runner` | `_run_ffmpeg_capturing_warnings` + 三档 `WarningTracker` |
+| `ffmpeg_runner` | `_run_ffmpeg_capturing_warnings` + 三档 `WarningTracker` + 运行时负压缩监控 |
 | `duration` | `DurationResolver` + `DurationCache`（JSON 持久化） |
 | `grouping` | 按 camera 分组 + 按时间分组（含 broken 断点） |
-| `compress` | 单文件压制 + post-validate |
-| `merge` | 多文件 NVENC 合并、`-c copy` 直拼、`_concat_copy_fallback` |
+| `compress` | 单文件压制 + post-validate + preflight 码率预检 |
+| `merge` | 多文件 NVENC 合并、`-c copy` 直拼、`_concat_copy_fallback`、负压缩四层防护接入 |
 | `report` | 警告汇总报告 |
-| `pipeline` | `process_videos_in_folder` 主循环 |
+| `pipeline` | `process_videos_in_folder` 主循环 + 文件夹级负压缩熔断 |
 | `cli` | argparse + 装配 |
 | `__main__` | `python -m car_replay` 入口 |
 | `combine_car_replay.py` | 兼容 shim，转发到 `cli.main()` |
@@ -196,12 +209,11 @@ NVENC 在低码率原片（夜间静止画面、本就低码率车规摄像头�
 - **`_adaptive_fill` 自适应抽样分治**：删除，靠磁盘缓存解决性能
 - **`combine_car_replay_compress_existing.py`**：旁支脚本，删除
 - **`combine_car_replay_compress_test.py`**：旁支脚本，删除
-- **`__tests__/`**：自动化测试，删除（用户决定靠真实数据手测）
 - **WarningTracker 14 类细分输出**：内部计数保留；对外简化为三档
 
 ## 手测命令清单（smoke）
 
-下列命令**留给用户运行**，覆盖六个验收点。三个真实路径不替换。
+下列命令**留给用户运行**，覆盖五个验收点。三个真实路径不替换。
 
 ### 1. 首次跑（最小子目录，安全模式）
 
