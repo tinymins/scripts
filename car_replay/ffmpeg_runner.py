@@ -304,6 +304,68 @@ def _format_elapsed(seconds: float) -> str:
     return f"{mm:02d}:{ss:02d}"
 
 
+def _evaluate_negative_compression_state(
+    state: dict,
+    *,
+    cur_secs: float,
+    cur_out_bytes: int,
+    expected_duration: float,
+    expected_input_bytes: int,
+    wall_elapsed_s: float,
+    now_s: float,
+    thresholds: dict,
+) -> Optional[str]:
+    """Pure state-machine step for the negative-compression monitor.
+
+    Mutates ``state`` (the same dict used by ``_run_ffmpeg_capturing_warnings``).
+    Returns the abort reason string if this step triggers an abort, otherwise
+    ``None``. No I/O — caller is responsible for terminating the ffmpeg
+    process and printing the message.
+    """
+    if state.get("monitor_aborted"):
+        return None
+    if cur_secs <= 0:
+        return None
+    if wall_elapsed_s < thresholds["warmup_secs"]:
+        return None
+    if cur_secs / float(expected_duration) < thresholds["warmup_progress_pct"]:
+        return None
+    predicted_out = cur_out_bytes / cur_secs * float(expected_duration)
+    ratio = predicted_out / float(expected_input_bytes)
+    state["monitor_last_ratio"] = ratio
+
+    if state.get("monitor_phase") == "OK":
+        if ratio > thresholds["enter_bad_ratio"]:
+            state["monitor_phase"] = "WARN"
+            state["monitor_warn_started_at"] = now_s
+            state["monitor_good_streak_started_at"] = None
+        return None
+
+    # WARN
+    if ratio < thresholds["exit_good_ratio"]:
+        if state.get("monitor_good_streak_started_at") is None:
+            state["monitor_good_streak_started_at"] = now_s
+        elif (now_s - state["monitor_good_streak_started_at"]) >= thresholds["exit_ok_secs"]:
+            state["monitor_phase"] = "OK"
+            state["monitor_warn_started_at"] = None
+            state["monitor_good_streak_started_at"] = None
+        return None
+    state["monitor_good_streak_started_at"] = None
+
+    warn_started = state.get("monitor_warn_started_at") or now_s
+    if (now_s - warn_started) >= thresholds["abort_hold_secs"] and ratio > thresholds["abort_ratio"]:
+        state["monitor_aborted"] = True
+        reason = (
+            f"negative compression: predicted ratio {ratio:.2f}x "
+            f"sustained for {int(now_s - warn_started)}s "
+            f"(out={format_size(cur_out_bytes)} at time={cur_secs:.1f}s, "
+            f"input={format_size(expected_input_bytes)})"
+        )
+        state["monitor_abort_reason"] = reason
+        return reason
+    return None
+
+
 def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False,
                                    expected_duration=None,
                                    expected_input_bytes: Optional[int] = None,
@@ -471,49 +533,19 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
         cur_out_bytes = _parse_ffmpeg_size_to_bytes(progress.get("size", ""))
         if cur_secs is None or cur_out_bytes is None or cur_secs <= 0:
             return
-        thr = NEGATIVE_COMPRESSION_THRESHOLDS
-        # warmup：wall-clock 与输出进度比例都得跨过门槛
-        if (time.time() - start) < thr["warmup_secs"]:
-            return
-        if cur_secs / float(expected_duration) < thr["warmup_progress_pct"]:
-            return
-        predicted_out = cur_out_bytes / cur_secs * float(expected_duration)
-        ratio = predicted_out / float(expected_input_bytes)
-        state["monitor_last_ratio"] = ratio
-        now = time.time()
-
-        if state["monitor_phase"] == "OK":
-            if ratio > thr["enter_bad_ratio"]:
-                state["monitor_phase"] = "WARN"
-                state["monitor_warn_started_at"] = now
-                state["monitor_good_streak_started_at"] = None
-            return
-
-        # WARN 状态
-        if ratio < thr["exit_good_ratio"]:
-            if state["monitor_good_streak_started_at"] is None:
-                state["monitor_good_streak_started_at"] = now
-            elif (now - state["monitor_good_streak_started_at"]) >= thr["exit_ok_secs"]:
-                # 回到 OK
-                state["monitor_phase"] = "OK"
-                state["monitor_warn_started_at"] = None
-                state["monitor_good_streak_started_at"] = None
-            return
-        # ratio 没掉到 exit_good_ratio 以下：清空 good streak
-        state["monitor_good_streak_started_at"] = None
-
-        # 是否触发 abort：WARN 持续够久 + 当前仍超 abort_ratio
-        warn_started = state["monitor_warn_started_at"] or now
-        if (now - warn_started) >= thr["abort_hold_secs"] and ratio > thr["abort_ratio"]:
-            state["monitor_aborted"] = True
-            state["monitor_abort_reason"] = (
-                f"negative compression: predicted ratio {ratio:.2f}x "
-                f"sustained for {int(now - warn_started)}s "
-                f"(out={format_size(cur_out_bytes)} at time={cur_secs:.1f}s, "
-                f"input={format_size(expected_input_bytes)})"
-            )
+        reason = _evaluate_negative_compression_state(
+            state,
+            cur_secs=cur_secs,
+            cur_out_bytes=cur_out_bytes,
+            expected_duration=float(expected_duration),
+            expected_input_bytes=int(expected_input_bytes),
+            wall_elapsed_s=time.time() - start,
+            now_s=time.time(),
+            thresholds=NEGATIVE_COMPRESSION_THRESHOLDS,
+        )
+        if reason:
             clear_status_line()
-            print(f"[abort] {state['monitor_abort_reason']}")
+            print(f"[abort] {reason}")
             try:
                 proc.terminate()
             except OSError:
