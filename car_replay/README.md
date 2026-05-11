@@ -9,6 +9,7 @@
 - **磁盘缓存**：几万文件首次跑慢、二次跑秒过
 - **broken 断点**：整文件损坏的源作为时间分组断点并自身丢弃
 - **post-validate + 三档警告**：压制完成后再校验，可疑/失败 → concat copy 兜底，杜绝产物画面卡死
+- **负压缩防护（pre-flight + 运行时迟滞监控 + post-check + 文件夹熔断）**：避免 NVENC 在低码率素材上反向膨胀浪费 GPU
 
 适用场景：`\\10.8.28.10\iot\360CAR`、`LS_AR_IMX335`、`LS_S3` 三目录持续合并压制后长期仅保留压制产物。
 
@@ -140,6 +141,19 @@ flowchart TD
 - `is_fatal`：returncode != 0 或致命模式命中
 
 `post_validate`：ffprobe 能开 + duration 在期望 ±5% + size > 0。
+
+## 负压缩防护
+
+NVENC 在低码率原片（夜间静止画面、本就低码率车规摄像头）上会被 `-rc vbr -cq N -maxrate ...` 推到接近 maxrate，**输出反而比输入大**。四层防护：
+
+| 层 | 位置 | 触发 | 处理 |
+|---|---|---|---|
+| 1. Pre-flight 码率预检 | `merge.py` 入口 | 输入平均码率 < `profile.bitrate × PREFLIGHT_BITRATE_MARGIN` (1.1) | 不进 NVENC，直接 concat copy；计入熔断计数 |
+| 2. 运行时迟滞监控 | `ffmpeg_runner._run_ffmpeg_capturing_warnings` | warmup 30s 后，`predicted_final_ratio` 跨进 0.95 → WARN；持续 20s 仍 > 1.0 → 中断 | `proc.terminate()` → 哨兵 `rc = NEGATIVE_COMPRESSION_ABORT_RC (-2)`，调用方删 temp 走 concat copy |
+| 3. Post-run 兜底 | `compress.py` / `merge.py` 成功路径 | 跑完一切正常，但 `out_size > in_size` | 删产物，concat copy fallback |
+| 4. 文件夹级熔断 | `pipeline.py` | 同一文件夹累计 `NEGATIVE_COMPRESSION_FOLDER_BREAKER` (5) 次反向膨胀 | 本文件夹剩余组 `enable_compress=False` |
+
+阈值集中在 `config.py::NEGATIVE_COMPRESSION_THRESHOLDS` 与同名常量，需要调整在那里改。
 
 ## 缓存机制
 
