@@ -183,7 +183,7 @@ _PROGRESS_FIELD_RES = {
 # 进度条 / spinner 渲染常量
 # ============================================================
 
-_BAR_LEN = 20
+_BAR_LEN = 10
 _BAR_FILLED = "█"
 _BAR_EMPTY = "░"
 _SPINNER_FRAMES = "|/-\\"
@@ -299,38 +299,43 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
 
     def render_status(force: bool = False) -> None:
         elapsed_s = time.time() - start
-        parts = [_color(f"[{_format_elapsed(elapsed_s)}]", _C_GRAY)]
+
+        # ETA: 优先从 speed= 字段计算，回退到 elapsed 比例法。
+        # 抽到外层是为了与 elapsed 合并到首段 [elapsed/ETA] 显示。
+        eta_s: Optional[float] = None
+        cur_secs = _parse_ffmpeg_time_to_seconds(progress.get("time", "")) if state["any_progress"] else None
+        pct = 0.0
+        if state["any_progress"] and has_duration and cur_secs is not None:
+            pct = max(0.0, min(100.0, cur_secs / float(expected_duration) * 100.0))
+            speed_val = None
+            speed_raw = progress.get("speed", "")
+            if speed_raw and speed_raw != "N/A":
+                try:
+                    speed_val = float(speed_raw.rstrip("x"))
+                except ValueError:
+                    pass
+            if speed_val and speed_val > 0 and cur_secs < float(expected_duration):
+                eta_s = (float(expected_duration) - cur_secs) / speed_val
+            elif pct > 0 and elapsed_s > 0:
+                eta_s = (elapsed_s / pct) * (100.0 - pct)
+
+        head = f"[{_format_elapsed(elapsed_s)}/{format_eta(eta_s)}]" if eta_s is not None \
+            else f"[{_format_elapsed(elapsed_s)}]"
+        parts = [_color(head, _C_GRAY)]
 
         # 进度条 / spinner
         if state["any_progress"]:
-            cur_secs = _parse_ffmpeg_time_to_seconds(progress.get("time", ""))
             if has_duration and cur_secs is not None:
-                pct = max(0.0, min(100.0, cur_secs / float(expected_duration) * 100.0))
                 bar, pct_str = _render_progress_bar(pct)
                 parts.append(bar)
                 parts.append(pct_str)
-
-                # ETA: 优先从 speed= 字段计算，回退到 elapsed 比例法
-                speed_val = None
-                speed_raw = progress.get("speed", "")
-                if speed_raw and speed_raw != "N/A":
-                    try:
-                        speed_val = float(speed_raw.rstrip("x"))
-                    except ValueError:
-                        pass
-                if speed_val and speed_val > 0 and cur_secs < float(expected_duration):
-                    eta_s: Optional[float] = (float(expected_duration) - cur_secs) / speed_val
-                elif pct > 0 and elapsed_s > 0:
-                    eta_s = (elapsed_s / pct) * (100.0 - pct)
-                else:
-                    eta_s = None
-                parts.append(_color(f"ETA {format_eta(eta_s)}", _C_CYAN))
 
                 # 字节量：按进度百分比折算 input 消耗量
                 if expected_input_bytes:
                     processed_bytes = int(expected_input_bytes * pct / 100.0)
                     parts.append(_color(
-                        f"bytes={format_size(processed_bytes)}/{format_size(expected_input_bytes)}",
+                        f"{format_size(processed_bytes).replace(' ', '')}"
+                        f"/{format_size(expected_input_bytes).replace(' ', '')}",
                         _C_CYAN,
                     ))
             else:
@@ -338,24 +343,24 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                 state["spinner_idx"] += 1
                 parts.append(_color(spin, _C_CYAN))
 
-            # 进度字段
+            # 进度字段（紧凑：数字+单位/后缀，不带 key= 前缀）
             frame = progress.get("frame")
             fps = progress.get("fps")
             if frame is not None:
-                parts.append(_color(f"frame={frame}", _C_CYAN))
+                parts.append(_color(f"{frame}frames", _C_CYAN))
             if fps is not None:
-                parts.append(_color(f"fps={fps}", _C_CYAN))
+                parts.append(_color(f"{fps}fps", _C_CYAN))
             time_v = progress.get("time")
             if time_v is not None:
                 secs = _parse_ffmpeg_time_to_seconds(time_v)
-                time_disp = f"time={secs:.2f}s" if secs is not None else f"time={time_v}"
+                time_disp = f"{secs:.2f}s" if secs is not None else f"{time_v}"
                 parts.append(_color(time_disp, _C_GREEN))
             bitrate = progress.get("bitrate")
             if bitrate is not None:
-                parts.append(_color(f"bitrate={bitrate}", _C_GRAY))
+                parts.append(_color(f"{bitrate}", _C_GRAY))
             speed = progress.get("speed")
             if speed is not None:
-                # speed 字段已含 x 后缀（如 "3.18x"）；缩成数字+x
+                # speed 字段已含 x 后缀（如 "3.18x"）
                 parts.append(_color(speed, _C_GREEN))
 
         nonzero = [(k, c) for k, c in tracker.counts.items() if c > 0]
@@ -581,9 +586,9 @@ def _selftest():
         bar100, pct100 = _render_progress_bar(100)
         assert _ANSI_RE.sub("", bar0) == _BAR_EMPTY * _BAR_LEN
         assert _ANSI_RE.sub("", bar100) == _BAR_FILLED * _BAR_LEN
-        # 50% → 10/10 split
+        # 50% → half/half split
         plain50 = _ANSI_RE.sub("", bar50)
-        assert plain50.count(_BAR_FILLED) == 10 and plain50.count(_BAR_EMPTY) == 10, plain50
+        assert plain50.count(_BAR_FILLED) == _BAR_LEN // 2 and plain50.count(_BAR_EMPTY) == _BAR_LEN - _BAR_LEN // 2, plain50
         # 颜色档位：进度条统一青色（不再按百分比切档）
         assert "\x1b[96m" in bar0
         assert "\x1b[96m" in bar50
