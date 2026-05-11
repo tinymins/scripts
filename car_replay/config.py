@@ -102,6 +102,30 @@ DEFAULT_PROFILE = {
 
 VIDEO_EXTS = {".mp4", ".ts"}
 
+# ============================================================
+# 负压缩防护参数
+# ============================================================
+
+# Pre-flight：若输入平均码率 ≤ profile.bitrate × MARGIN，直接跳过 NVENC 走 copy
+PREFLIGHT_BITRATE_MARGIN = 1.1
+
+# 运行时迟滞状态机阈值
+NEGATIVE_COMPRESSION_THRESHOLDS = {
+    "warmup_secs": 30,           # 编码已运行的真实秒数门槛（wall-clock）
+    "warmup_progress_pct": 0.05,  # 输出 time= 占 expected_duration 比例门槛
+    "enter_bad_ratio": 0.95,     # predicted_final_ratio 超过此值进入 WARN
+    "exit_good_ratio": 0.85,     # predicted_final_ratio 低于此值视作恢复
+    "exit_ok_secs": 10,          # WARN 中连续多少秒 ratio < exit_good_ratio 则回 OK
+    "abort_hold_secs": 20,       # WARN 持续多少秒后判定真正反向膨胀
+    "abort_ratio": 1.0,          # 触发中断时还要求最近采样 ratio > 此值（兜底防抖）
+}
+
+# 文件夹级熔断：累计 N 次反向膨胀后，本文件夹剩余组全部跳过 NVENC（0 = 禁用）
+NEGATIVE_COMPRESSION_FOLDER_BREAKER = 5
+
+# runner 哨兵返回码：表示被监控状态机主动中断
+NEGATIVE_COMPRESSION_ABORT_RC = -2
+
 # ffmpeg / ffprobe 路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
