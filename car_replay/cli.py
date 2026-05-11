@@ -14,6 +14,10 @@ from .pipeline import process_videos_in_folder
 
 
 def _pause_before_exit():
+    # 非交互（Linux/CI/重定向 stdin）直接返回，避免脚本看上去卡死
+    if not sys.stdin.isatty():
+        return
+
     if os.name == "nt":
         os.system("pause")
         return
