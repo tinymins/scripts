@@ -8,8 +8,13 @@ import subprocess
 from pathlib import Path
 
 from . import console
-from .compress import compress_video
-from .config import FFMPEG, format_size, get_compress_profile
+from .compress import compress_video, preflight_should_skip_nvenc
+from .config import (
+    FFMPEG,
+    NEGATIVE_COMPRESSION_ABORT_RC,
+    format_size,
+    get_compress_profile,
+)
 from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 from .naming import _basename, extract_camera_id
 
@@ -216,6 +221,12 @@ def _concat_copy_fallback(
 def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None,
                  warning_collector=None, duration_resolver=None,
                  verbose_ffmpeg=False, verbose_cmd=False, src_folder=None):
+    """合并 + 可选压缩。
+
+    返回 (in_sz, out_sz, elapsed, negative_flag)
+    negative_flag=True 表示该组因负压缩（运行时中断 / 跑完发现膨胀 / preflight 拒绝）
+    被降级到 copy；调用方应据此累计文件夹熔断计数。
+    """
     last_video_stats = os.stat(video_group[-1])
     last_access_time, last_mod_time = last_video_stats.st_atime, last_video_stats.st_mtime
     camera_id = extract_camera_id(_basename(video_group[0]))
@@ -231,12 +242,25 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             )
             enable_compress = False
 
+    # Pre-flight 负压缩预检：若输入码率本就低于目标 → 直接走 copy，避免 GPU 浪费
+    preflight_negative = False
+    if enable_compress:
+        profile = get_compress_profile(camera_id, cq_override)
+        skip_reason = preflight_should_skip_nvenc(video_group, profile, duration_resolver)
+        if skip_reason:
+            console.warn(
+                f"Pre-flight skipped NVENC ({skip_reason}); falling back to -c copy",
+                indent=2,
+            )
+            enable_compress = False
+            preflight_negative = True
+
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩
         console.step(f"Compressing single file: {_basename(video_group[0])}")
         console.detail(f"→ {combined_file}")
         single_dur = _sum_durations(video_group, duration_resolver)
-        success, in_sz, out_sz, elapsed, tracker = compress_video(
+        success, in_sz, out_sz, elapsed, tracker, neg_flag = compress_video(
             video_group[0], combined_file, camera_id, cq_override,
             expected_duration=single_dur,
             verbose_ffmpeg=verbose_ffmpeg,
@@ -246,7 +270,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             if warning_collector is not None and tracker is not None:
                 warning_collector.append((combined_file, tracker))
             os.utime(combined_file, (last_access_time, last_mod_time))
-            return in_sz, out_sz, elapsed
+            return in_sz, out_sz, elapsed, False
         # 压缩失败 → 丢弃压制阶段 tracker；同扩展名直接 copy；否则走 _concat_copy_fallback
         _remove_stale_warn_log(combined_file)
         console.warn("Compression failed, falling back to copy/remux...", indent=2)
@@ -257,11 +281,11 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
                 shutil.copy2(video_group[0], combined_file)
                 os.utime(combined_file, (last_access_time, last_mod_time))
                 copied_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
-                return in_sz, copied_size, elapsed
+                return in_sz, copied_size, elapsed, neg_flag
             except OSError as exc:
                 console.error(f"copy fallback failed: {exc}", indent=2)
                 _write_failure_log(combined_file, video_group, f"copy: {exc}", duration_resolver)
-                return in_sz, 0, elapsed
+                return in_sz, 0, elapsed, neg_flag
         ok, _, _ = _concat_copy_fallback(
             video_group, combined_file,
             expected_duration=_sum_durations(video_group, duration_resolver),
@@ -273,8 +297,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         if ok:
             os.utime(combined_file, (last_access_time, last_mod_time))
             out_sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
-            return in_sz, out_sz, elapsed
-        return in_sz, 0, elapsed
+            return in_sz, out_sz, elapsed, neg_flag
+        return in_sz, 0, elapsed, neg_flag
 
     if (len(video_group) == 1 and not enable_compress
             and os.path.splitext(video_group[0])[1].lower() == ".mp4"):
@@ -283,7 +307,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         console.detail(f"→ {combined_file}")
         shutil.copy2(video_group[0], combined_file)
         sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
-        return sz, sz, 0
+        return sz, sz, 0, preflight_negative
 
     console.step(f"Merging {len(video_group)} files into {_basename(combined_file)}")
     console.list_items(
@@ -323,9 +347,36 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
             cmd, verbose=verbose_ffmpeg, expected_duration=expected_duration,
             expected_input_bytes=input_size,
+            abort_on_negative_ratio=True,
         )
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)
+
+        # 监控状态机主动中断 → 直接走降级路径，标记 negative
+        aborted_negative = (returncode == NEGATIVE_COMPRESSION_ABORT_RC)
+        if aborted_negative:
+            console.warn(
+                f"Merge+Compress aborted by monitor: "
+                f"{tracker.abort_reason or 'negative compression detected'}; "
+                f"falling back to concat copy",
+                indent=2,
+            )
+            if os.path.exists(temp_output):
+                try: os.remove(temp_output)
+                except OSError: pass
+            _remove_stale_warn_log(combined_file)
+            ok, _, _ = _concat_copy_fallback(
+                video_group, combined_file, expected_duration=expected_duration,
+                warning_collector=warning_collector, duration_resolver=duration_resolver,
+                was_fallback=True,
+                verbose_ffmpeg=verbose_ffmpeg,
+                verbose_cmd=verbose_cmd, src_folder=src_folder,
+            )
+            if ok:
+                os.utime(combined_file, (last_access_time, last_mod_time))
+                output_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+                return input_size, output_size, elapsed, True
+            return input_size, 0, elapsed, True
 
         result = CommandResult(returncode, elapsed, tracker, Path(temp_output), expected_duration)
         downgrade = _downgrade_reason(result)
@@ -349,8 +400,38 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
                 os.utime(combined_file, (last_access_time, last_mod_time))
                 # 降级也算实绩：返回真实 input / output / elapsed
                 output_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
-                return input_size, output_size, elapsed
-            return input_size, 0, elapsed
+                return input_size, output_size, elapsed, False
+            return input_size, 0, elapsed, False
+
+        # 兜底：跑完发现输出比输入还大 → 视为负压缩，丢弃改 copy
+        try:
+            tmp_size = os.path.getsize(temp_output)
+        except OSError:
+            tmp_size = 0
+        if tmp_size > input_size and input_size > 0:
+            console.warn(
+                f"Post-run negative compression detected: "
+                f"{format_size(input_size)} -> {format_size(tmp_size)} "
+                f"({tmp_size / input_size:.2f}x); falling back to concat copy",
+                indent=2,
+            )
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
+            _remove_stale_warn_log(combined_file)
+            ok, _, _ = _concat_copy_fallback(
+                video_group, combined_file, expected_duration=expected_duration,
+                warning_collector=warning_collector, duration_resolver=duration_resolver,
+                was_fallback=True,
+                verbose_ffmpeg=verbose_ffmpeg,
+                verbose_cmd=verbose_cmd, src_folder=src_folder,
+            )
+            if ok:
+                os.utime(combined_file, (last_access_time, last_mod_time))
+                output_size = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
+                return input_size, output_size, elapsed, True
+            return input_size, 0, elapsed, True
 
         # 压制成功，未降级 → 此时才把压制阶段 tracker 入 collector
         if warning_collector is not None:
@@ -368,7 +449,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             indent=2,
         )
         os.utime(combined_file, (last_access_time, last_mod_time))
-        return input_size, output_size, elapsed
+        return input_size, output_size, elapsed, False
 
     # 不压缩：concat copy + post_validate（含二次保护）
     ok, _, _ = _concat_copy_fallback(
@@ -383,7 +464,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         os.utime(combined_file, (last_access_time, last_mod_time))
         in_sz = sum(os.path.getsize(v) for v in video_group if os.path.exists(v))
         out_sz = os.path.getsize(combined_file) if os.path.exists(combined_file) else 0
-        return in_sz, out_sz, 0
+        return in_sz, out_sz, 0, preflight_negative
     console.error("Merge failed (see .failure.log).", indent=2)
     in_sz = sum(os.path.getsize(v) for v in video_group if os.path.exists(v))
-    return in_sz, 0, 0
+    return in_sz, 0, 0, preflight_negative
