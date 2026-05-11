@@ -7,7 +7,11 @@ import shutil
 import time
 from typing import Dict
 
-from .config import format_eta, format_size
+from .config import (
+    NEGATIVE_COMPRESSION_FOLDER_BREAKER,
+    format_eta,
+    format_size,
+)
 from . import console
 from .grouping import (
     create_combined_filename,
@@ -93,6 +97,8 @@ def process_videos_in_folder(
     processed_groups = 0
     skipped_groups = 0
     failed_groups = 0
+    negative_compression_count = 0
+    breaker_tripped = False
     if video_files:
         # 按照摄像机ID进行初始分组
         camera_groups = group_videos_by_camera(video_files, src_folder)
@@ -183,9 +189,13 @@ def process_videos_in_folder(
                 continue
 
             if should_process:
+                # 文件夹级熔断生效后，本组直接走 copy
+                effective_compress = enable_compress
+                if breaker_tripped:
+                    effective_compress = False
                 try:
-                    in_sz, out_sz, elapsed = merge_videos(
-                        group, combined_file_path, enable_compress, cq_override,
+                    in_sz, out_sz, elapsed, neg_flag = merge_videos(
+                        group, combined_file_path, effective_compress, cq_override,
                         warning_collector=warning_collector,
                         duration_resolver=duration_resolver,
                         verbose_ffmpeg=verbose_ffmpeg,
@@ -207,6 +217,17 @@ def process_videos_in_folder(
                 total_elapsed += elapsed
                 if enable_compress and in_sz > 0 and out_sz == 0:
                     failed_groups += 1
+                if neg_flag:
+                    negative_compression_count += 1
+                    if (NEGATIVE_COMPRESSION_FOLDER_BREAKER > 0
+                            and not breaker_tripped
+                            and negative_compression_count >= NEGATIVE_COMPRESSION_FOLDER_BREAKER):
+                        breaker_tripped = True
+                        console.warn(
+                            f"本文件夹已累计 {negative_compression_count} 次反向膨胀，"
+                            f"剩余视频组转入 copy 模式（NVENC 已对该路视频不再有效）",
+                            indent=2,
+                        )
             else:
                 console.detail(f"Combined file already exists, skipping: {combined_file_path}")
                 skipped_groups += 1
@@ -225,6 +246,12 @@ def process_videos_in_folder(
         ]
         if failed_groups > 0:
             rows.append(("失败", failed_groups))
+        if negative_compression_count > 0:
+            rows.append(("反向膨胀降级数", negative_compression_count))
+        if breaker_tripped:
+            rows.append(
+                ("文件夹级熔断", f"已触发（阈值 {NEGATIVE_COMPRESSION_FOLDER_BREAKER}）"),
+            )
         if enable_compress and total_input_size > 0:
             overall_ratio = total_input_size / total_output_size if total_output_size > 0 else 0
             overall_saving = (1 - total_output_size / total_input_size) * 100
