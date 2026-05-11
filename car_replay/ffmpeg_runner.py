@@ -13,7 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .config import FFPROBE, SUSPICIOUS_RULES, WARNING_LABELS, WARNING_PATTERNS, format_eta, format_size
+from .config import (
+    FFPROBE,
+    NEGATIVE_COMPRESSION_ABORT_RC,
+    NEGATIVE_COMPRESSION_THRESHOLDS,
+    SUSPICIOUS_RULES,
+    WARNING_LABELS,
+    WARNING_PATTERNS,
+    format_eta,
+    format_size,
+)
 from .console import (
     _ANSI_RE,
     _C_BOLD,
@@ -76,6 +85,8 @@ class WarningTracker:
         self.unmatched_error_lines = 0
         self.mode = mode
         self.was_fallback = False
+        # 由监控状态机在主动中断时写入；非空字符串表示该 tracker 来自被中断的运行
+        self.abort_reason: Optional[str] = None
 
     def feed(self, line):
         """喂入一行 ffmpeg stderr，更新计数。
@@ -176,7 +187,35 @@ _PROGRESS_FIELD_RES = {
     "time": re.compile(r"time=\s*([\d:.NA/-]+)"),
     "bitrate": re.compile(r"bitrate=\s*([\d.]+\s*\S*|N/A)"),
     "speed": re.compile(r"speed=\s*([\d.]+x|N/A)"),
+    "size": re.compile(r"\bsize=\s*(\d+(?:\.\d+)?\s*[kKmMgG]?i?B|N/A)"),
 }
+
+
+_SIZE_UNIT_FACTORS = {
+    "B": 1,
+    "KB": 1000, "KIB": 1024,
+    "MB": 1000 * 1000, "MIB": 1024 * 1024,
+    "GB": 1000 * 1000 * 1000, "GIB": 1024 * 1024 * 1024,
+}
+
+
+def _parse_ffmpeg_size_to_bytes(s: Optional[str]) -> Optional[int]:
+    """ffmpeg size= 字段（如 ``1234kB`` / ``1.5MiB`` / ``N/A``）→ 字节数；解析失败 → None。"""
+    if not s or s == "N/A":
+        return None
+    s = s.strip()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([kKmMgG]?i?B)?$", s)
+    if not m:
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    unit = (m.group(2) or "B").upper()
+    factor = _SIZE_UNIT_FACTORS.get(unit)
+    if factor is None:
+        return None
+    return int(num * factor)
 
 
 # ============================================================
@@ -267,13 +306,17 @@ def _format_elapsed(seconds: float) -> str:
 
 def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False,
                                    expected_duration=None,
-                                   expected_input_bytes: Optional[int] = None):
+                                   expected_input_bytes: Optional[int] = None,
+                                   abort_on_negative_ratio: bool = False):
     """运行 ffmpeg，实时归类 stderr 警告并以单行覆盖式打印进度。
 
     verbose=True 时退化为老行为（每行原样透传），用于排障。
     expected_duration: 预计输出时长（秒），用于渲染进度条；None / 0 → 用 spinner。
+    abort_on_negative_ratio: True 时启用迟滞状态机监控压缩率，反向膨胀持续超阈值即中断。
     返回 (returncode, elapsed_seconds, tracker)。
     mode 透传给 WarningTracker。
+    被监控状态机主动中断时，returncode = NEGATIVE_COMPRESSION_ABORT_RC，
+    tracker.abort_reason 含人类可读原因。
     """
     tracker = WarningTracker(mode=mode)
     start = time.time()
@@ -288,12 +331,24 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
 
     is_tty = sys.stdout.isatty()
     has_duration = bool(expected_duration and expected_duration > 0)
+    monitor_enabled = bool(
+        abort_on_negative_ratio
+        and has_duration
+        and expected_input_bytes
+    )
     state = {
         "last_flush": 0.0,
         "last_line_len": 0,
         "feed_count_since_flush": 0,
         "any_progress": False,
         "spinner_idx": 0,
+        # 负压缩监控状态机
+        "monitor_phase": "OK",            # "OK" | "WARN"
+        "monitor_warn_started_at": None,  # float wall-clock
+        "monitor_good_streak_started_at": None,
+        "monitor_last_ratio": None,
+        "monitor_aborted": False,
+        "monitor_abort_reason": None,
     }
     progress = {}  # type: dict
 
@@ -408,6 +463,62 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
         if now - state["last_flush"] >= 1.0:
             render_status()
 
+    def evaluate_monitor() -> None:
+        """每条进度行后调用：维护负压缩迟滞状态机，必要时 terminate ffmpeg。"""
+        if not monitor_enabled or state["monitor_aborted"]:
+            return
+        cur_secs = _parse_ffmpeg_time_to_seconds(progress.get("time", ""))
+        cur_out_bytes = _parse_ffmpeg_size_to_bytes(progress.get("size", ""))
+        if cur_secs is None or cur_out_bytes is None or cur_secs <= 0:
+            return
+        thr = NEGATIVE_COMPRESSION_THRESHOLDS
+        # warmup：wall-clock 与输出进度比例都得跨过门槛
+        if (time.time() - start) < thr["warmup_secs"]:
+            return
+        if cur_secs / float(expected_duration) < thr["warmup_progress_pct"]:
+            return
+        predicted_out = cur_out_bytes / cur_secs * float(expected_duration)
+        ratio = predicted_out / float(expected_input_bytes)
+        state["monitor_last_ratio"] = ratio
+        now = time.time()
+
+        if state["monitor_phase"] == "OK":
+            if ratio > thr["enter_bad_ratio"]:
+                state["monitor_phase"] = "WARN"
+                state["monitor_warn_started_at"] = now
+                state["monitor_good_streak_started_at"] = None
+            return
+
+        # WARN 状态
+        if ratio < thr["exit_good_ratio"]:
+            if state["monitor_good_streak_started_at"] is None:
+                state["monitor_good_streak_started_at"] = now
+            elif (now - state["monitor_good_streak_started_at"]) >= thr["exit_ok_secs"]:
+                # 回到 OK
+                state["monitor_phase"] = "OK"
+                state["monitor_warn_started_at"] = None
+                state["monitor_good_streak_started_at"] = None
+            return
+        # ratio 没掉到 exit_good_ratio 以下：清空 good streak
+        state["monitor_good_streak_started_at"] = None
+
+        # 是否触发 abort：WARN 持续够久 + 当前仍超 abort_ratio
+        warn_started = state["monitor_warn_started_at"] or now
+        if (now - warn_started) >= thr["abort_hold_secs"] and ratio > thr["abort_ratio"]:
+            state["monitor_aborted"] = True
+            state["monitor_abort_reason"] = (
+                f"negative compression: predicted ratio {ratio:.2f}x "
+                f"sustained for {int(now - warn_started)}s "
+                f"(out={format_size(cur_out_bytes)} at time={cur_secs:.1f}s, "
+                f"input={format_size(expected_input_bytes)})"
+            )
+            clear_status_line()
+            print(f"[abort] {state['monitor_abort_reason']}")
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
     def handle_line(raw: str) -> None:
         line = raw.rstrip("\r\n")
         if not line:
@@ -417,6 +528,13 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
             sys.stderr.flush()
             if not _is_progress_line(line):
                 tracker.feed(line)
+            else:
+                # verbose 模式也要解析进度字段以驱动 monitor
+                for k, regex in _PROGRESS_FIELD_RES.items():
+                    m = regex.search(line)
+                    if m:
+                        progress[k] = m.group(1).strip()
+                evaluate_monitor()
             return
         if _is_progress_line(line):
             for k, regex in _PROGRESS_FIELD_RES.items():
@@ -425,6 +543,7 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                     progress[k] = m.group(1).strip()
             state["any_progress"] = True
             state["feed_count_since_flush"] += 1
+            evaluate_monitor()
             maybe_flush()
             return
         matched, was_err = tracker.feed(line)
@@ -464,19 +583,39 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                 del buf[:i + 1]
                 handle_line(line_bytes.decode("utf-8", "replace"))
     finally:
-        proc.wait()
+        # 若被监控状态机中断：terminate 已发，给点时间退出，超时再 kill
+        if state["monitor_aborted"]:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        else:
+            proc.wait()
         if buf:
             handle_line(bytes(buf).decode("utf-8", "replace"))
+        # 中断 → 写入 tracker.abort_reason 并把返回码改为哨兵
+        if state["monitor_aborted"]:
+            tracker.abort_reason = state["monitor_abort_reason"]
+            effective_rc = NEGATIVE_COMPRESSION_ABORT_RC
+        else:
+            effective_rc = proc.returncode
         if not verbose:
             clear_status_line()
             elapsed_s = time.time() - start
             summary_summary = tracker.format_oneline()
             print(
                 f"[{_format_elapsed(elapsed_s)}] ffmpeg done "
-                f"rc={proc.returncode} | {summary_summary}"
+                f"rc={effective_rc} | {summary_summary}"
             )
     elapsed = time.time() - start
-    return proc.returncode, elapsed, tracker
+    return effective_rc, elapsed, tracker
 
 
 # ============================================================
