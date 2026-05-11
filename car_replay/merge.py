@@ -29,7 +29,7 @@ def _write_concat_list(concat_list_path, video_group):
 
 
 def _copy_merge_videos(video_group, combined_file, verbose_ffmpeg=False,
-                       expected_duration=None):
+                       expected_duration=None, expected_input_bytes=None):
     """直接 stream-copy concat 合并；失败抛 CalledProcessError。"""
     concat_list_path = combined_file + ".concat_list.txt"
     _write_concat_list(concat_list_path, video_group)
@@ -46,6 +46,7 @@ def _copy_merge_videos(video_group, combined_file, verbose_ffmpeg=False,
         returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
             command, mode="concat_copy", verbose=verbose_ffmpeg,
             expected_duration=expected_duration,
+            expected_input_bytes=expected_input_bytes,
         )
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
@@ -121,10 +122,14 @@ def _concat_copy_fallback(
     返回 (ok, elapsed, tracker)。
     """
     elapsed, tracker, run_ok = 0.0, None, False
+    group_input_bytes = sum(os.path.getsize(v) for v in video_group if os.path.exists(v))
     try:
-        elapsed, tracker = _copy_merge_videos(video_group, combined_file,
-                                              verbose_ffmpeg=verbose_ffmpeg,
-                                              expected_duration=expected_duration)
+        elapsed, tracker = _copy_merge_videos(
+            video_group, combined_file,
+            verbose_ffmpeg=verbose_ffmpeg,
+            expected_duration=expected_duration,
+            expected_input_bytes=group_input_bytes,
+        )
         run_ok = True
     except subprocess.CalledProcessError as exc:
         console.error(f"concat copy failed (rc={exc.returncode})", indent=2)
@@ -317,6 +322,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         console.cmd_line(cmd[0], cmd[1:], verbose=verbose_cmd, base_dir=src_folder)
         returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
             cmd, verbose=verbose_ffmpeg, expected_duration=expected_duration,
+            expected_input_bytes=input_size,
         )
         if os.path.exists(concat_list_path):
             os.remove(concat_list_path)

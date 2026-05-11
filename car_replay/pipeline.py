@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
+from typing import Dict
 
-from .config import format_size
+from .config import format_eta, format_size
 from . import console
 from .grouping import (
     create_combined_filename,
@@ -25,6 +27,23 @@ def check_file_exists(file_path):
     return os.path.exists(file_path)
 
 
+def _print_group_done(
+    group_idx: int, total_groups: int,
+    done_bytes: int, total_bytes: int,
+    done_files: int, total_files: int,
+    start_time: float,
+) -> None:
+    """整体进度：每组结束后打印一行进度摘要。"""
+    pct = done_bytes / total_bytes * 100 if total_bytes > 0 else 0.0
+    elapsed = time.time() - start_time
+    eta_s = (elapsed / done_bytes) * (total_bytes - done_bytes) if done_bytes > 0 else None
+    console.success(
+        f"Group {group_idx}/{total_groups} done · "
+        f"{format_size(done_bytes)}/{format_size(total_bytes)} ({pct:.1f}%) · "
+        f"{done_files}/{total_files} files · ETA {format_eta(eta_s)}"
+    )
+
+
 def process_videos_in_folder(
     src_folder,
     target_folder_base,
@@ -42,6 +61,7 @@ def process_videos_in_folder(
 ):
     video_files = []
     other_files = []
+    video_file_sizes: Dict[str, int] = {}
 
     # 优化扫描文件速度，使用os.scandir递归
     console.section("Scanning source")
@@ -52,11 +72,13 @@ def process_videos_in_folder(
                 scan_folder(entry.path)
             elif entry.is_file():
                 # 排除0B文件
-                if entry.stat().st_size == 0:
+                sz = entry.stat().st_size
+                if sz == 0:
                     console.warn(f"Skipping 0B file: {entry.path}", indent=2)
                     continue
                 if _is_video_file(entry.name):
                     video_files.append(entry.path)
+                    video_file_sizes[entry.path] = sz
                 else:
                     other_files.append(entry.path)
 
@@ -88,6 +110,12 @@ def process_videos_in_folder(
         total_input_size = 0
         total_output_size = 0
         total_elapsed = 0
+
+        total_bytes = sum(video_file_sizes.values())
+        total_video_files = len(video_files)
+        done_bytes = 0
+        done_files = 0
+        overall_start_time = time.time()
 
         # 处理每个视频组
         for group in grouped_videos:
@@ -148,6 +176,10 @@ def process_videos_in_folder(
                         console.detail(f"  ↪ … (+{len(group)-3} more)", indent=4)
                 else:
                     skipped_groups += 1
+                group_bytes = sum(video_file_sizes.get(p, 0) for p in group)
+                done_bytes += group_bytes
+                done_files += len(group)
+                _print_group_done(processed_groups, total_groups, done_bytes, total_bytes, done_files, total_video_files, overall_start_time)
                 continue
 
             if should_process:
@@ -165,6 +197,10 @@ def process_videos_in_folder(
                     console.error(f"处理该组时抛出异常: {exc}", indent=2)
                     traceback.print_exc()
                     failed_groups += 1
+                    group_bytes = sum(video_file_sizes.get(p, 0) for p in group)
+                    done_bytes += group_bytes
+                    done_files += len(group)
+                    _print_group_done(processed_groups, total_groups, done_bytes, total_bytes, done_files, total_video_files, overall_start_time)
                     continue
                 total_input_size += in_sz
                 total_output_size += out_sz
@@ -174,6 +210,11 @@ def process_videos_in_folder(
             else:
                 console.detail(f"Combined file already exists, skipping: {combined_file_path}")
                 skipped_groups += 1
+
+            group_bytes = sum(video_file_sizes.get(p, 0) for p in group)
+            done_bytes += group_bytes
+            done_files += len(group)
+            _print_group_done(processed_groups, total_groups, done_bytes, total_bytes, done_files, total_video_files, overall_start_time)
 
         # 打印汇总
         console.section("处理完成汇总")

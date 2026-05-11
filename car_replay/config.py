@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Optional
 
 # ============================================================
 # FFmpeg 警告分类与汇总
@@ -122,3 +123,20 @@ def format_size(size_bytes):
     elif size_bytes >= 1024 * 1024:
         return f"{size_bytes / (1024**2):.1f} MB"
     return f"{size_bytes / 1024:.1f} KB"
+
+
+def format_eta(seconds: Optional[float]) -> str:
+    """格式化剩余时间：None/0/负数 → '--'; <60s → '45s'; <3600s → '5m23s'; else → '2h15m'。"""
+    if seconds is None or seconds <= 0:
+        return "--"
+    s = int(seconds)
+    if s <= 0:
+        return "--"
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m, sec = divmod(s, 60)
+        return f"{m}m{sec:02d}s"
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    return f"{h}h{m:02d}m"

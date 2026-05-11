@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .config import FFPROBE, SUSPICIOUS_RULES, WARNING_LABELS, WARNING_PATTERNS
+from .config import FFPROBE, SUSPICIOUS_RULES, WARNING_LABELS, WARNING_PATTERNS, format_eta, format_size
 from .console import (
     _ANSI_RE,
     _C_BOLD,
@@ -266,7 +266,8 @@ def _format_elapsed(seconds: float) -> str:
 
 
 def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = False,
-                                   expected_duration=None):
+                                   expected_duration=None,
+                                   expected_input_bytes: Optional[int] = None):
     """运行 ffmpeg，实时归类 stderr 警告并以单行覆盖式打印进度。
 
     verbose=True 时退化为老行为（每行原样透传），用于排障。
@@ -308,6 +309,30 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                 bar, pct_str = _render_progress_bar(pct)
                 parts.append(bar)
                 parts.append(pct_str)
+
+                # ETA: 优先从 speed= 字段计算，回退到 elapsed 比例法
+                speed_val = None
+                speed_raw = progress.get("speed", "")
+                if speed_raw and speed_raw != "N/A":
+                    try:
+                        speed_val = float(speed_raw.rstrip("x"))
+                    except ValueError:
+                        pass
+                if speed_val and speed_val > 0 and cur_secs < float(expected_duration):
+                    eta_s: Optional[float] = (float(expected_duration) - cur_secs) / speed_val
+                elif pct > 0 and elapsed_s > 0:
+                    eta_s = (elapsed_s / pct) * (100.0 - pct)
+                else:
+                    eta_s = None
+                parts.append(_color(f"ETA {format_eta(eta_s)}", _C_CYAN))
+
+                # 字节量：按进度百分比折算 input 消耗量
+                if expected_input_bytes:
+                    processed_bytes = int(expected_input_bytes * pct / 100.0)
+                    parts.append(_color(
+                        f"bytes={format_size(processed_bytes)}/{format_size(expected_input_bytes)}",
+                        _C_CYAN,
+                    ))
             else:
                 spin = _SPINNER_FRAMES[state["spinner_idx"] % len(_SPINNER_FRAMES)]
                 state["spinner_idx"] += 1

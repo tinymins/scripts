@@ -57,6 +57,7 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
 
     returncode, elapsed, tracker = _run_ffmpeg_capturing_warnings(
         cmd, verbose=verbose_ffmpeg, expected_duration=expected_duration,
+        expected_input_bytes=input_size,
     )
 
     result = CommandResult(
