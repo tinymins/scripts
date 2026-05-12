@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Optional
 
 # ============================================================
@@ -131,9 +132,17 @@ H264_TARGET_RATIO = 0.65   # h264 输入派生 NVENC profile 时的目标码率�
 X265_DEFAULT_CRF = 26       # x265 默认 CRF 值
 
 # ffmpeg / ffprobe 路径
+# Windows: .vendor/ffmpeg/*.exe
+# Linux:   .vendor/ffmpeg/linux-x86_64/bin/{ffmpeg,ffprobe}
+#          （nightly tarball 原结构；二进制 rpath = $ORIGIN/../lib，自带依赖 .so 在 ../lib，不要拆）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
-FFPROBE = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffprobe.exe")
+_VENDOR_FFMPEG_DIR = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg")
+if sys.platform.startswith("win"):
+    FFMPEG = os.path.join(_VENDOR_FFMPEG_DIR, "ffmpeg.exe")
+    FFPROBE = os.path.join(_VENDOR_FFMPEG_DIR, "ffprobe.exe")
+else:
+    FFMPEG = os.path.join(_VENDOR_FFMPEG_DIR, "linux-x86_64", "bin", "ffmpeg")
+    FFPROBE = os.path.join(_VENDOR_FFMPEG_DIR, "linux-x86_64", "bin", "ffprobe")
 
 
 def get_compress_profile(camera_id, cq_override=None):
