@@ -126,6 +126,10 @@ NEGATIVE_COMPRESSION_FOLDER_BREAKER = 5
 # runner 哨兵返回码：表示被监控状态机主动中断
 NEGATIVE_COMPRESSION_ABORT_RC = -2
 
+# codec-aware preflight 参数
+H264_TARGET_RATIO = 0.65   # h264 输入派生 NVENC profile 时的目标码率比例
+X265_DEFAULT_CRF = 26       # x265 默认 CRF 值
+
 # ffmpeg / ffprobe 路径
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG = os.path.join(SCRIPT_DIR, "..", ".vendor", "ffmpeg", "ffmpeg.exe")
@@ -138,6 +142,56 @@ def get_compress_profile(camera_id, cq_override=None):
     if cq_override is not None:
         profile["cq"] = cq_override
     return profile
+
+
+_BITRATE_UNIT_FACTORS = {
+    "": 1, "B": 1,
+    "K": 1_000, "KB": 1_000,
+    "M": 1_000_000, "MB": 1_000_000,
+    "G": 1_000_000_000, "GB": 1_000_000_000,
+}
+
+
+def _parse_profile_bitrate_to_bps(s: str) -> Optional[int]:
+    """profile['bitrate'] 形如 ``8M`` / ``3000K`` / ``5000000`` → 整数 bps；解析失败 → None。"""
+    if not s:
+        return None
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([kKmMgG]?[bB]?)$", s.strip())
+    if not m:
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    factor = _BITRATE_UNIT_FACTORS.get(m.group(2).upper())
+    if factor is None:
+        return None
+    return int(num * factor)
+
+
+def derive_h264_nvenc_profile(default_profile: dict, input_bps: int) -> dict:
+    """h264 输入走 NVENC 时派生目标 profile。
+
+    target  = min(default_target_bps, int(input_bps * H264_TARGET_RATIO))
+    maxrate = min(default_maxrate_bps, input_bps)
+    bufsize = max(target * 2, maxrate)
+
+    码率字段以 bps 整数字符串形式写回（ffmpeg 可直接接受），其余字段（cq/preset 等）继承。
+    """
+    default_target = _parse_profile_bitrate_to_bps(default_profile.get("bitrate", "")) or 0
+    default_maxrate = _parse_profile_bitrate_to_bps(default_profile.get("maxrate", "")) or 0
+
+    target = min(default_target, int(input_bps * H264_TARGET_RATIO)) if default_target else int(
+        input_bps * H264_TARGET_RATIO
+    )
+    maxrate = min(default_maxrate, input_bps) if default_maxrate else input_bps
+    bufsize = max(target * 2, maxrate)
+
+    derived = default_profile.copy()
+    derived["bitrate"] = str(target)
+    derived["maxrate"] = str(maxrate)
+    derived["bufsize"] = str(bufsize)
+    return derived
 
 
 def format_size(size_bytes):

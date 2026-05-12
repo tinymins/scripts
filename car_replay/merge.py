@@ -6,15 +6,24 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from . import console
-from .compress import compress_video, preflight_should_skip_nvenc
+from .compress import (
+    PreflightDecision,
+    _build_video_codec_args,
+    compress_video,
+    decide_compression,
+    preflight_should_skip_nvenc,
+)
 from .config import (
     FFMPEG,
     NEGATIVE_COMPRESSION_ABORT_RC,
+    X265_DEFAULT_CRF,
     format_size,
     get_compress_profile,
 )
+from .duration import group_codec_and_bitrate
 from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 from .naming import _basename, extract_camera_id
 
@@ -220,12 +229,15 @@ def _concat_copy_fallback(
 
 def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None,
                  warning_collector=None, duration_resolver=None,
-                 verbose_ffmpeg=False, verbose_cmd=False, src_folder=None):
+                 verbose_ffmpeg=False, verbose_cmd=False, src_folder=None,
+                 encoder: str = "nvenc", x265_crf: Optional[int] = None):
     """合并 + 可选压缩。
 
     返回 (in_sz, out_sz, elapsed, negative_flag)
-    negative_flag=True 表示该组因负压缩（运行时中断 / 跑完发现膨胀 / preflight 拒绝）
-    被降级到 copy；调用方应据此累计文件夹熔断计数。
+    negative_flag=True 表示该组因真正的负压缩（运行时中断 / 跑完发现膨胀）被降级到 copy。
+    codec-aware 规则性 skip（codec gate）不计入 negative_flag。
+    encoder: "nvenc"（默认）或 "x265-veryslow"
+    x265_crf: x265 CRF 值；None 时使用 X265_DEFAULT_CRF
     """
     last_video_stats = os.stat(video_group[-1])
     last_access_time, last_mod_time = last_video_stats.st_atime, last_video_stats.st_mtime
@@ -242,18 +254,37 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             )
             enable_compress = False
 
-    # Pre-flight 负压缩预检：若输入码率本就低于目标 → 直接走 copy，避免 GPU 浪费
+    # Pre-flight：codec-aware 决策（根因修复）
     preflight_negative = False
+    encode_profile = None
     if enable_compress:
-        profile = get_compress_profile(camera_id, cq_override)
-        skip_reason = preflight_should_skip_nvenc(video_group, profile, duration_resolver)
-        if skip_reason:
-            console.warn(
-                f"Pre-flight skipped NVENC ({skip_reason}); falling back to -c copy",
-                indent=2,
+        base_profile = get_compress_profile(camera_id, cq_override)
+        if duration_resolver is not None and hasattr(duration_resolver, "probe"):
+            group_codec, group_bps = group_codec_and_bitrate(
+                [Path(v) for v in video_group], duration_resolver
             )
-            enable_compress = False
-            preflight_negative = True
+            decision = decide_compression(base_profile, group_codec, group_bps, encoder=encoder)
+            if decision.action == "copy":
+                console.warn(
+                    f"Pre-flight codec gate: {decision.reason}; falling back to -c copy",
+                    indent=2,
+                )
+                enable_compress = False
+                preflight_negative = decision.count_as_negative
+            else:
+                encode_profile = decision.profile
+        else:
+            # resolver 不支持 probe()（测试兼容路径）：沿用旧 bitrate-only 预检
+            skip_reason = preflight_should_skip_nvenc(video_group, base_profile, duration_resolver)
+            if skip_reason:
+                console.warn(
+                    f"Pre-flight skipped NVENC ({skip_reason}); falling back to -c copy",
+                    indent=2,
+                )
+                enable_compress = False
+                preflight_negative = False
+            else:
+                encode_profile = base_profile
 
     if len(video_group) == 1 and enable_compress:
         # 单文件 + 压缩
@@ -265,6 +296,7 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
             expected_duration=single_dur,
             verbose_ffmpeg=verbose_ffmpeg,
             verbose_cmd=verbose_cmd, src_folder=src_folder,
+            profile_override=encode_profile, encoder=encoder, x265_crf=x265_crf,
         )
         if success:
             if warning_collector is not None and tracker is not None:
@@ -321,25 +353,23 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         # 合并+压缩一步完成
         concat_list_path = combined_file + ".concat_list.txt"
         _write_concat_list(concat_list_path, video_group)
-        profile = get_compress_profile(camera_id, cq_override)
+        profile = encode_profile or get_compress_profile(camera_id, cq_override)
         input_size = sum(os.path.getsize(v) for v in video_group)
         expected_duration = _sum_durations(video_group, duration_resolver)
+        cq_disp = profile.get("cq", "?")
         console.step(
-            f"Merge+Compress [{camera_id or '??'}] CQ{profile['cq']} "
-            f"({len(video_group)} files)..."
+            f"Merge+Compress [{camera_id or '??'}] CQ{cq_disp} "
+            f"({len(video_group)} files, encoder={encoder})..."
         )
 
         temp_output = combined_file + ".compress_tmp.mp4"
+        video_codec_args = _build_video_codec_args(profile, encoder=encoder, x265_crf=x265_crf)
+        input_flags = ["-hwaccel", "cuda"] if encoder == "nvenc" else []
         cmd = [
-            FFMPEG, "-y", "-hwaccel", "cuda",
+            FFMPEG, "-y", *input_flags,
             "-fflags", "+genpts+igndts", "-err_detect", "ignore_err",
             "-f", "concat", "-safe", "0", "-i", concat_list_path,
-            "-c:v", "hevc_nvenc", "-preset", profile["preset"],
-            "-rc", "vbr", "-cq", str(profile["cq"]),
-            "-b:v", profile["bitrate"], "-maxrate", profile["maxrate"],
-            "-bufsize", profile["bufsize"], "-multipass", "fullres",
-            "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1",
-            "-bf", "4", "-b_ref_mode", "middle",
+            *video_codec_args,
             "-c:a", "copy", "-movflags", "+faststart", temp_output,
         ]
 

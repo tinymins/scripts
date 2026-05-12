@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -12,35 +12,82 @@ from .config import (
     FFMPEG,
     NEGATIVE_COMPRESSION_ABORT_RC,
     PREFLIGHT_BITRATE_MARGIN,
+    X265_DEFAULT_CRF,
+    _parse_profile_bitrate_to_bps,
+    derive_h264_nvenc_profile,
     format_size,
     get_compress_profile,
 )
 from .ffmpeg_runner import CommandResult, _run_ffmpeg_capturing_warnings
 
 
-_BITRATE_UNIT_FACTORS = {
-    "": 1, "B": 1,
-    "K": 1_000, "KB": 1_000,
-    "M": 1_000_000, "MB": 1_000_000,
-    "G": 1_000_000_000, "GB": 1_000_000_000,
-}
+@dataclass
+class PreflightDecision:
+    """codec-aware preflight 的统一决策结果。"""
+
+    action: str               # "encode" 或 "copy"
+    profile: Optional[dict]   # action="encode" 时必填；action="copy" 时为 None
+    reason: str               # 人类可读描述
+    count_as_negative: bool   # folder breaker 是否计数（规则性 skip = False）
 
 
-def _parse_profile_bitrate_to_bps(s: str) -> Optional[int]:
-    """profile['bitrate'] 形如 ``8M`` / ``3000K`` / ``5000000`` → 整数 bps；解析失败 → None。"""
-    if not s:
-        return None
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*([kKmMgG]?[bB]?)$", s.strip())
-    if not m:
-        return None
-    try:
-        num = float(m.group(1))
-    except ValueError:
-        return None
-    factor = _BITRATE_UNIT_FACTORS.get(m.group(2).upper())
-    if factor is None:
-        return None
-    return int(num * factor)
+def decide_compression(
+    default_profile: dict,
+    group_codec: Optional[str],
+    group_bps: Optional[int],
+    encoder: str = "nvenc",
+) -> PreflightDecision:
+    """codec-aware preflight 决策函数。
+
+    决策规则（严格按 plan.md Phase 2 表格）：
+    1. mixed codec group → COPY count=False
+    2. codec/bitrate unknown → COPY count=False（fail-closed）
+    3. hevc + input_bps ≤ target×MARGIN → COPY count=False
+    4. hevc + input_bps > target×MARGIN → ENCODE default_profile
+    5. 非 hevc + nvenc → ENCODE derive_h264_nvenc_profile(...)
+    6. 非 hevc + x265 → ENCODE default_profile（CRF 模式）
+    """
+    # 1. 混合 codec
+    if group_codec == "mixed":
+        return PreflightDecision(
+            action="copy", profile=None,
+            reason="mixed codec group", count_as_negative=False,
+        )
+
+    # 2. metadata 未知
+    if group_codec is None or group_bps is None or group_bps <= 0:
+        return PreflightDecision(
+            action="copy", profile=None,
+            reason="metadata unknown, fail-closed", count_as_negative=False,
+        )
+
+    # 3 & 4. hevc
+    if group_codec == "hevc":
+        target_bps = _parse_profile_bitrate_to_bps(default_profile.get("bitrate", ""))
+        if target_bps and group_bps <= target_bps * PREFLIGHT_BITRATE_MARGIN:
+            return PreflightDecision(
+                action="copy", profile=None,
+                reason="hevc input bitrate at or below target", count_as_negative=False,
+            )
+        return PreflightDecision(
+            action="encode", profile=default_profile,
+            reason="hevc input bitrate above target", count_as_negative=False,
+        )
+
+    # 5 & 6. 非 hevc（h264 或其他已知 codec）
+    if encoder == "nvenc":
+        derived = derive_h264_nvenc_profile(default_profile, group_bps)
+        return PreflightDecision(
+            action="encode", profile=derived,
+            reason=f"non-hevc ({group_codec}), nvenc derived profile",
+            count_as_negative=False,
+        )
+    else:  # x265-veryslow
+        return PreflightDecision(
+            action="encode", profile=default_profile,
+            reason=f"non-hevc ({group_codec}), x265 crf",
+            count_as_negative=False,
+        )
 
 
 def preflight_should_skip_nvenc(
@@ -89,45 +136,71 @@ def preflight_should_skip_nvenc(
     return None
 
 
-def compress_video(input_path, output_path, camera_id, cq_override=None,
-                   expected_duration=None, verbose_ffmpeg=False,
-                   verbose_cmd=False, src_folder=None):
+def _build_video_codec_args(
+    profile: dict, encoder: str = "nvenc", x265_crf: Optional[int] = None
+) -> list:
+    """构建 ffmpeg 视频编码参数列表。
+
+    encoder="nvenc" → hevc_nvenc VBR 模式（使用 profile 中的 cq/bitrate/maxrate/bufsize）。
+    encoder="x265-veryslow" → libx265 CRF 模式（不使用 bitrate/maxrate/bufsize）。
     """
-    使用 hevc_nvenc 压缩视频文件。
-    input_path: 输入文件（合并后的临时文件或单个源文件）
-    output_path: 最终输出路径
-    camera_id: 通道ID，用于选择压缩参数
-    expected_duration: 输入合计时长（秒），用于 post_validate 时长比对；None 则跳过比对
-    返回 (success, in_sz, out_sz, elapsed, tracker, negative_flag)
-    negative_flag=True 表示该次运行因负压缩被中断或事后丢弃，调用方应据此累计文件夹熔断计数。
-    """
-    profile = get_compress_profile(camera_id, cq_override)
-    input_size = os.path.getsize(input_path)
-
-    console.step(f"Compressing [{camera_id or '??'}] CQ{profile['cq']}...")
-
-    temp_output = output_path + ".compress_tmp.mp4"
-
-    cmd = [
-        FFMPEG,
-        "-y",
-        "-hwaccel", "cuda",
-        "-fflags", "+genpts+igndts",
-        "-err_detect", "ignore_err",
-        "-i", input_path,
+    if encoder == "x265-veryslow":
+        crf = x265_crf if x265_crf is not None else X265_DEFAULT_CRF
+        return ["-c:v", "libx265", "-preset", "veryslow", "-crf", str(crf)]
+    # nvenc
+    return [
         "-c:v", "hevc_nvenc",
-        "-preset", profile["preset"],
+        "-preset", profile.get("preset", "p7"),
         "-rc", "vbr",
-        "-cq", str(profile["cq"]),
-        "-b:v", profile["bitrate"],
-        "-maxrate", profile["maxrate"],
-        "-bufsize", profile["bufsize"],
+        "-cq", str(profile.get("cq", 32)),
+        "-b:v", str(profile.get("bitrate", "5M")),
+        "-maxrate", str(profile.get("maxrate", "8M")),
+        "-bufsize", str(profile.get("bufsize", "10M")),
         "-multipass", "fullres",
         "-rc-lookahead", "32",
         "-spatial-aq", "1",
         "-temporal-aq", "1",
         "-bf", "4",
         "-b_ref_mode", "middle",
+    ]
+
+
+def compress_video(input_path, output_path, camera_id, cq_override=None,
+                   expected_duration=None, verbose_ffmpeg=False,
+                   verbose_cmd=False, src_folder=None,
+                   profile_override: Optional[dict] = None,
+                   encoder: str = "nvenc",
+                   x265_crf: Optional[int] = None):
+    """
+    压缩视频文件（NVENC 或 x265）。
+    input_path: 输入文件（合并后的临时文件或单个源文件）
+    output_path: 最终输出路径
+    camera_id: 通道ID，用于选择压缩参数（profile_override 不为 None 时忽略）
+    expected_duration: 输入合计时长（秒），用于 post_validate 时长比对；None 则跳过比对
+    profile_override: 不为 None 时覆盖 get_compress_profile() 返回值
+    encoder: "nvenc"（默认）或 "x265-veryslow"
+    x265_crf: x265 CRF 值；None 时使用 X265_DEFAULT_CRF
+    返回 (success, in_sz, out_sz, elapsed, tracker, negative_flag)
+    negative_flag=True 表示该次运行因负压缩被中断或事后丢弃，调用方应据此累计文件夹熔断计数。
+    """
+    profile = profile_override if profile_override is not None else get_compress_profile(camera_id, cq_override)
+    input_size = os.path.getsize(input_path)
+
+    cq_disp = profile.get("cq", "?")
+    console.step(f"Compressing [{camera_id or '??'}] CQ{cq_disp} encoder={encoder}...")
+
+    temp_output = output_path + ".compress_tmp.mp4"
+
+    video_codec_args = _build_video_codec_args(profile, encoder=encoder, x265_crf=x265_crf)
+    input_flags = ["-hwaccel", "cuda"] if encoder == "nvenc" else []
+    cmd = [
+        FFMPEG,
+        "-y",
+        *input_flags,
+        "-fflags", "+genpts+igndts",
+        "-err_detect", "ignore_err",
+        "-i", input_path,
+        *video_codec_args,
         "-c:a", "copy",
         "-movflags", "+faststart",
         temp_output,

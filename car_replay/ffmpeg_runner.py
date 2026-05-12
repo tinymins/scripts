@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -37,29 +38,102 @@ from .console import (
 )
 
 
-def _run_ffprobe(path, timeout: float = 60.0) -> Tuple[Optional[float], bool]:
-    """跑一次 ffprobe 取 format.duration。
+@dataclass
+class ProbeResult:
+    """ffprobe 解析结果。broken 仅当 duration 缺失或 ffprobe 失败时为 True；其余字段缺失只是 None。"""
 
-    Returns (duration_or_None, broken_bool)。失败 / 非零返回码 / 解析失败 / 超时 / OSError → broken=True。
+    duration: Optional[float]
+    broken: bool
+    codec: Optional[str]       # video stream codec_name，如 "hevc"/"h264"；缺失 None
+    format_bps: Optional[int]  # format.bit_rate（bps），缺失 None
+    size_bytes: Optional[int]  # format.size（bytes），缺失 None
+    width: Optional[int]
+    height: Optional[int]
+
+
+def _run_ffprobe(path, timeout: float = 60.0) -> ProbeResult:
+    """跑一次 ffprobe，返回 ProbeResult。
+
+    broken=True 仅当 duration 缺失或 ffprobe 退出码非 0；其余字段缺失只是 None。
     """
+    _broken = ProbeResult(duration=None, broken=True, codec=None,
+                          format_bps=None, size_bytes=None, width=None, height=None)
     if not os.path.exists(FFPROBE):
-        return (None, True)
-    cmd = [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
+        return _broken
+    cmd = [
+        FFPROBE, "-v", "error", "-print_format", "json",
+        "-show_entries", "stream=codec_name,width,height",
+        "-show_entries", "format=duration,bit_rate,size",
+        "-select_streams", "v:0", str(path),
+    ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except (subprocess.TimeoutExpired, OSError):
-        return (None, True)
+        return _broken
     if r.returncode != 0:
-        return (None, True)
-    raw = (r.stdout or "").strip()
+        return _broken
     try:
-        duration = float(raw)
-    except ValueError:
-        return (None, True)
-    if not math.isfinite(duration) or duration <= 0:
-        return (None, True)
-    return (duration, False)
+        data = json.loads(r.stdout or "{}")
+    except (ValueError, json.JSONDecodeError):
+        return _broken
+
+    fmt = data.get("format", {})
+    streams = data.get("streams", [])
+    stream = streams[0] if streams else {}
+
+    # duration（来自 format）
+    duration: Optional[float] = None
+    try:
+        raw_dur = fmt.get("duration")
+        if raw_dur is not None:
+            d = float(raw_dur)
+            if math.isfinite(d) and d > 0:
+                duration = d
+    except (ValueError, TypeError):
+        pass
+
+    broken = duration is None
+
+    # codec（来自第一个 stream）
+    codec: Optional[str] = stream.get("codec_name") or None
+
+    # format_bps
+    format_bps: Optional[int] = None
+    try:
+        br = fmt.get("bit_rate")
+        if br is not None:
+            format_bps = int(br)
+    except (ValueError, TypeError):
+        pass
+
+    # size_bytes
+    size_bytes: Optional[int] = None
+    try:
+        sz = fmt.get("size")
+        if sz is not None:
+            size_bytes = int(sz)
+    except (ValueError, TypeError):
+        pass
+
+    # width / height
+    width: Optional[int] = None
+    height: Optional[int] = None
+    try:
+        w = stream.get("width")
+        if w is not None:
+            width = int(w)
+    except (ValueError, TypeError):
+        pass
+    try:
+        h = stream.get("height")
+        if h is not None:
+            height = int(h)
+    except (ValueError, TypeError):
+        pass
+
+    return ProbeResult(duration=duration, broken=broken, codec=codec,
+                       format_bps=format_bps, size_bytes=size_bytes,
+                       width=width, height=height)
 
 
 class WarningTracker:
@@ -707,16 +781,16 @@ class CommandResult:
                 return (False, f"stat failed: {exc}")
             if size <= 0:
                 return (False, "output empty")
-            duration, broken = _run_ffprobe(str(p))
-            if broken or duration is None:
+            probe = _run_ffprobe(str(p))
+            if probe.broken or probe.duration is None:
                 return (False, "ffprobe failed")
             if self.expected_duration is not None:
                 tolerance = max(self.expected_duration * tolerance_factor, 1.0)
-                if abs(duration - self.expected_duration) > tolerance:
+                if abs(probe.duration - self.expected_duration) > tolerance:
                     return (
                         False,
                         f"duration mismatch (expected {self.expected_duration:.1f}, "
-                        f"got {duration:.1f})",
+                        f"got {probe.duration:.1f})",
                     )
             return (True, "")
         except Exception as exc:  # 任意意外都收敛

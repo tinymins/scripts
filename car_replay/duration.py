@@ -12,11 +12,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import FFPROBE
 from . import console
-from .ffmpeg_runner import _run_ffprobe
+from .ffmpeg_runner import ProbeResult, _run_ffprobe
 from .naming import _basename, parse_video_filename
 
 
@@ -107,6 +107,23 @@ class DurationCache:
         if entry is not None:
             entry["health"] = {"broken": bool(broken), "probed_at": time.time()}
 
+    def put_probe(self, path, probe: ProbeResult) -> None:
+        """存储完整 ffprobe 结果（含 codec/size_bytes/format_bps/width/height）。"""
+        if not self.enabled:
+            return
+        entry = self._entry_with_stat(path)
+        if entry is not None:
+            entry["probe_codec"] = probe.codec
+            entry["probe_format_bps"] = probe.format_bps
+            entry["probe_size_bytes"] = probe.size_bytes
+            entry["probe_width"] = probe.width
+            entry["probe_height"] = probe.height
+            entry["probe_done"] = True
+            if probe.duration is not None:
+                entry["duration"] = probe.duration
+                entry["duration_source"] = "ffprobe"
+            entry["health"] = {"broken": probe.broken, "probed_at": time.time()}
+
 
 class DurationResolver:
     def __init__(
@@ -125,6 +142,7 @@ class DurationResolver:
         self._mem_duration: Dict[str, Optional[float]] = {}
         self._mem_source: Dict[str, Optional[str]] = {}
         self._mem_broken: Dict[str, bool] = {}
+        self._mem_probe: Dict[str, ProbeResult] = {}
         self.stats = {"ffprobe_probes": 0, "cache_hits": 0, "filename_hits": 0,
                       "unavailable": 0, "broken": 0}
 
@@ -154,13 +172,13 @@ class DurationResolver:
         # ffprobe
         if not self.enabled:
             return self._record_unavailable(path, "ffprobe duration probing disabled")
-        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
+        probe = _run_ffprobe(path, timeout=self.probe_timeout)
         self.stats["ffprobe_probes"] += 1
-        if broken:
+        if probe.broken:
             self._record_broken(path)
             return self._record_unavailable(path, "ffprobe failed")
-        self._record_duration(path, duration, "ffprobe")
-        return duration
+        self._record_duration(path, probe.duration, "ffprobe")
+        return probe.duration
 
     def prepare_series(self, video_series: Iterable[str], *, with_health: Optional[bool] = None) -> None:
         """两遍并发解析：① duration ② 可选 health。"""
@@ -253,6 +271,44 @@ class DurationResolver:
             return not self._mem_broken[key]
         return None
 
+    def probe(self, p: Path) -> ProbeResult:
+        """返回单个文件的完整 ProbeResult（codec/bitrate/size/duration）。
+
+        优先从内存缓存取，cache miss 时调 ffprobe 并回写缓存。
+        同时更新 duration 和 health 缓存。
+        """
+        path = str(p)
+        key = _cache_key(path)
+        if key in self._mem_probe:
+            return self._mem_probe[key]
+        # 尝试从磁盘缓存重建
+        cached = self.cache.get_valid_entry(path)
+        if cached is not None and cached.get("probe_done"):
+            result = ProbeResult(
+                duration=cached.get("duration"),
+                broken=bool((cached.get("health") or {}).get("broken", True)),
+                codec=cached.get("probe_codec"),
+                format_bps=cached.get("probe_format_bps"),
+                size_bytes=cached.get("probe_size_bytes"),
+                width=cached.get("probe_width"),
+                height=cached.get("probe_height"),
+            )
+            self._mem_probe[key] = result
+            return result
+        # ffprobe
+        result = _run_ffprobe(path, timeout=self.probe_timeout)
+        self._mem_probe[key] = result
+        self.cache.put_probe(path, result)
+        if not result.broken and result.duration is not None:
+            self._record_duration(path, result.duration, "ffprobe")
+        elif result.broken:
+            key2 = _cache_key(path)
+            if not self._mem_broken.get(key2):
+                self.stats["broken"] += 1
+                console.warn(f"broken 文件（ffprobe 失败/超时）: {_basename(path)}", indent=2)
+            self._mem_broken[key2] = True
+        return result
+
     # ---- 内部 ----
     def _run_parallel(self, items, worker) -> None:
         if self.probe_workers <= 1 or len(items) == 1:
@@ -266,25 +322,25 @@ class DurationResolver:
         if not os.path.exists(FFPROBE):
             self._record_unavailable(path, f"ffprobe not found: {FFPROBE}")
             return
-        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
+        probe = _run_ffprobe(path, timeout=self.probe_timeout)
         self.stats["ffprobe_probes"] += 1
-        if broken:
+        if probe.broken:
             self._record_broken(path)
             self._record_unavailable(path, "ffprobe failed")
             return
-        self._record_duration(path, duration, "ffprobe")
+        self._record_duration(path, probe.duration, "ffprobe")
 
     def _probe_health_worker(self, path) -> None:
         if not os.path.exists(FFPROBE):
             self._record_broken(path)
             return
-        duration, broken = _run_ffprobe(path, timeout=self.probe_timeout)
-        if broken:
+        probe = _run_ffprobe(path, timeout=self.probe_timeout)
+        if probe.broken:
             self._record_broken(path)
             return
         key = _cache_key(path)
-        if key not in self._mem_duration and duration is not None:
-            self._record_duration(path, duration, "ffprobe")
+        if key not in self._mem_duration and probe.duration is not None:
+            self._record_duration(path, probe.duration, "ffprobe")
         self._mem_broken[key] = False
         self.cache.put_health(path, broken=False)
 
@@ -326,3 +382,44 @@ def _effective_end(info, video_path=None, duration_resolver=None):
         if duration_seconds is not None:
             return info.datetime + timedelta(seconds=duration_seconds)
     return None
+
+
+def group_codec_and_bitrate(
+    paths: List[Path], resolver
+) -> Tuple[Optional[str], Optional[int]]:
+    """聚合一组视频的 codec 与平均 bitrate。
+
+    返回 (codec_result, avg_bps_result)：
+      - codec_result: 全部一致返回该值；混合返回 "mixed"；全 None 返回 None
+      - avg_bps_result: sum(size_bytes)*8/sum(duration)（使用 ffprobe format.size）；
+        任一项缺失则跳过该文件；全部缺失则返回 None
+
+    resolver 需实现 probe(p: Path) -> ProbeResult 接口（DurationResolver 已支持）。
+    """
+    codecs: List[str] = []
+    total_bytes = 0
+    total_secs = 0.0
+    any_size = False
+
+    for p in paths:
+        pr = resolver.probe(Path(p))
+        if pr.codec:
+            codecs.append(pr.codec)
+        if (pr.size_bytes is not None and pr.duration is not None and pr.duration > 0):
+            total_bytes += pr.size_bytes
+            total_secs += pr.duration
+            any_size = True
+
+    if not codecs:
+        codec_result: Optional[str] = None
+    elif len(set(codecs)) == 1:
+        codec_result = codecs[0]
+    else:
+        codec_result = "mixed"
+
+    if not any_size or total_secs <= 0:
+        bps_result: Optional[int] = None
+    else:
+        bps_result = int(total_bytes * 8 / total_secs)
+
+    return codec_result, bps_result
