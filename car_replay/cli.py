@@ -130,6 +130,18 @@ def main():
         action="store_true",
         help="完整打印 ffmpeg 命令行 + 文件列表（默认折叠为简短形式）",
     )
+    parser.add_argument(
+        "--encoder",
+        choices=["nvenc", "x265-veryslow"],
+        default="nvenc",
+        help="压缩编码器：nvenc（默认，GPU 硬件加速）或 x265-veryslow（CPU 软件编码）",
+    )
+    parser.add_argument(
+        "--x265-crf",
+        type=int,
+        default=None,
+        help="x265 CRF 质量值（仅 --encoder x265-veryslow 时有效；默认 26）",
+    )
     args = parser.parse_args()
 
     if args.no_windows_metadata_duration:
@@ -176,7 +188,10 @@ def main():
     console.kv("Output folder", target_folder_base)
     if enable_compress:
         cq_info = f"CQ override: {args.cq}" if args.cq else "使用通道默认值"
-        console.kv("Compression", f"ENABLED ({cq_info})")
+        encoder_info = args.encoder
+        if args.encoder == "x265-veryslow" and args.x265_crf is not None:
+            encoder_info += f" CRF={args.x265_crf}"
+        console.kv("Compression", f"ENABLED ({cq_info}, encoder={encoder_info})")
     else:
         console.kv("Compression", "DISABLED")
 
@@ -217,5 +232,7 @@ def main():
         ),
         dry_run=args.dry_run,
         overwrite=args.overwrite,
+        encoder=args.encoder,
+        x265_crf=args.x265_crf,
     )
     _pause_before_exit()
