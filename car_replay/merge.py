@@ -363,9 +363,13 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
         profile = encode_profile or get_compress_profile(camera_id, cq_override)
         input_size = sum(os.path.getsize(v) for v in video_group)
         expected_duration = _sum_durations(video_group, duration_resolver)
-        cq_disp = profile.get("cq", "?")
+        if encoder == "x265-veryslow":
+            crf_val = x265_crf if x265_crf is not None else X265_DEFAULT_CRF
+            quality_disp = f"CRF{crf_val}"
+        else:
+            quality_disp = f"CQ{profile.get('cq', '?')}"
         console.step(
-            f"Merge+Compress [{camera_id or '??'}] CQ{cq_disp} "
+            f"Merge+Compress [{camera_id or '??'}] {quality_disp} "
             f"({len(video_group)} files, encoder={encoder})..."
         )
 

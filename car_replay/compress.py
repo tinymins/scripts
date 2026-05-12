@@ -186,8 +186,12 @@ def compress_video(input_path, output_path, camera_id, cq_override=None,
     profile = profile_override if profile_override is not None else get_compress_profile(camera_id, cq_override)
     input_size = os.path.getsize(input_path)
 
-    cq_disp = profile.get("cq", "?")
-    console.step(f"Compressing [{camera_id or '??'}] CQ{cq_disp} encoder={encoder}...")
+    if encoder == "x265-veryslow":
+        crf_val = x265_crf if x265_crf is not None else X265_DEFAULT_CRF
+        quality_disp = f"CRF{crf_val}"
+    else:
+        quality_disp = f"CQ{profile.get('cq', '?')}"
+    console.step(f"Compressing [{camera_id or '??'}] {quality_disp} encoder={encoder}...")
 
     temp_output = output_path + ".compress_tmp.mp4"
 
