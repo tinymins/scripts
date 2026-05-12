@@ -142,6 +142,11 @@ def main():
         default=None,
         help="x265 CRF 质量值（仅 --encoder x265-veryslow 时有效；默认 26）",
     )
+    parser.add_argument(
+        "--force-encode",
+        action="store_true",
+        help="跳过 codec-aware preflight gate，无视输入码率强制走编码（用于测试编码器）",
+    )
     args = parser.parse_args()
 
     if args.no_windows_metadata_duration:
@@ -234,5 +239,6 @@ def main():
         overwrite=args.overwrite,
         encoder=args.encoder,
         x265_crf=args.x265_crf,
+        force_encode=args.force_encode,
     )
     _pause_before_exit()

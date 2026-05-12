@@ -230,7 +230,8 @@ def _concat_copy_fallback(
 def merge_videos(video_group, combined_file, enable_compress=False, cq_override=None,
                  warning_collector=None, duration_resolver=None,
                  verbose_ffmpeg=False, verbose_cmd=False, src_folder=None,
-                 encoder: str = "nvenc", x265_crf: Optional[int] = None):
+                 encoder: str = "nvenc", x265_crf: Optional[int] = None,
+                 force_encode: bool = False):
     """合并 + 可选压缩。
 
     返回 (in_sz, out_sz, elapsed, negative_flag)
@@ -259,7 +260,13 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     encode_profile = None
     if enable_compress:
         base_profile = get_compress_profile(camera_id, cq_override)
-        if duration_resolver is not None and hasattr(duration_resolver, "probe"):
+        if force_encode:
+            console.warn(
+                "Pre-flight codec gate bypassed by --force-encode",
+                indent=2,
+            )
+            encode_profile = base_profile
+        elif duration_resolver is not None and hasattr(duration_resolver, "probe"):
             group_codec, group_bps = group_codec_and_bitrate(
                 [Path(v) for v in video_group], duration_resolver
             )

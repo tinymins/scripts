@@ -64,6 +64,7 @@ def process_videos_in_folder(
     overwrite=False,
     encoder: str = "nvenc",
     x265_crf=None,
+    force_encode: bool = False,
 ):
     video_files = []
     other_files = []
@@ -205,6 +206,7 @@ def process_videos_in_folder(
                         src_folder=src_folder,
                         encoder=encoder,
                         x265_crf=x265_crf,
+                        force_encode=force_encode,
                     )
                 except Exception as exc:  # 单组兜底，不影响后续组
                     import traceback
