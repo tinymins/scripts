@@ -178,6 +178,9 @@ def main():
         enable_compress = True
     elif args.no_compress:
         enable_compress = False
+    elif args.force_encode:
+        # --force-encode 显式表达了"我要测试编码"，隐含开启压缩
+        enable_compress = True
     elif not args.src:
         # 交互模式：默认启用压缩
         compress_input = input("是否启用NVENC压缩？(Y/n): ").strip().lower()
