@@ -48,6 +48,8 @@
 | `--no-broken-split` | **新**：跳过 broken 健康探测，快速但漏检 |
 | `--monthly-subdirs auto\|on\|off` | **新**：输出按 `<dst>/YYYYMM/...` 分子目录；auto 仅对 `XIAOMI_*` 设备启用 |
 | `--max-group-duration-seconds N` | **新**：单个合并段累计时长上限 (默认 7200=2h, 0 关闭) |
+| `--encoder nvenc\|x265-veryslow` | **新**：选择视频编码器，默认 `nvenc`（GPU）；`x265-veryslow` = CPU 软编 + CRF |
+| `--x265-crf N` | **新**：x265 CRF（仅 `--encoder=x265-veryslow` 生效，默认 26；推荐 22~28） |
 | `--dry-run` | 仅打印将要执行的动作（不调 ffmpeg / 不创建目录 / 不写报告） |
 | `--overwrite` | 覆盖已存在的合并产物 / 已存在的非视频文件 |
 | `--verbose-ffmpeg` | 原样透传 ffmpeg stderr（关闭进度行覆盖渲染，排障用） |
@@ -157,16 +159,45 @@ flowchart TD
 
 ## 负压缩防护
 
-NVENC 在低码率原片（夜间静止画面、本就低码率车规摄像头）上会被 `-rc vbr -cq N -maxrate ...` 推到接近 maxrate，**输出反而比输入大**。四层防护：
+NVENC 在低码率原片（夜间静止画面、本就低码率车规摄像头）上会被 `-rc vbr -cq N -maxrate ...` 推到接近 maxrate，**输出反而比输入大**。**Phase 2** 在原四层防护之上引入了 codec-aware preflight 把根因解掉，剩下四层防护只作症状护栏。
+
+### Codec-aware preflight (统一决策)
+
+`compress.decide_compression(profile, group_codec, group_bps, encoder)` 在每组开跑前查 ffprobe 的 codec 与组平均 bitrate，按下表分派：
+
+| 输入 codec | bitrate 关系 | 决策 | 计 breaker？ |
+|---|---|---|---|
+| `hevc` | `≤ profile.bitrate × PREFLIGHT_BITRATE_MARGIN` (1.1) | concat copy | ❌ 否（规则正常 skip） |
+| `hevc` | `> profile.bitrate × 1.1` | encode（按 profile） | — |
+| 非 hevc（h264 等） | 任意 | **永远 encode**；NVENC 用派生 profile，x265 用 CRF | — |
+| `mixed` 组（codec 不一致） | — | concat copy | ❌ 否 |
+| codec / bitrate 全 unknown | — | concat copy（fail-closed） | ❌ 否 |
+
+**h264 → NVENC 派生 profile**（`config.derive_h264_nvenc_profile`）：
+
+```
+target  = min(default_target_bps, int(input_bps × H264_TARGET_RATIO))   # 0.65
+maxrate = min(default_maxrate_bps, input_bps)                            # 严格不超输入
+bufsize = max(target × 2, maxrate)
+```
+
+这保证 h264→hevc 即使是低码率原片，也不会被 DEFAULT_PROFILE 5M target 推到膨胀。
+
+### Encoder 选项
+
+`--encoder=nvenc`（默认）走 GPU 硬编 hevc_nvenc，速度快、CPU 占用极低。
+`--encoder=x265-veryslow` 走 CPU 软编 libx265 + CRF（默认 26，可 `--x265-crf` 调），画质上限更高、压缩效率更优，但单 4K 通常 ~1x 实时，**会满核占 CPU**；适合 NAS 上 GPU 不可用 / 想跑画质对比测试的场景。x265 路径下 hevc 输入仍按 PREFLIGHT_BITRATE_MARGIN 判 skip（CRF 重压低码率 hevc 也常常负收益）。
+
+### 兜底四层（症状护栏）
 
 | 层 | 位置 | 触发 | 处理 |
 |---|---|---|---|
-| 1. Pre-flight 码率预检 | `merge.py` 入口 | 输入平均码率 < `profile.bitrate × PREFLIGHT_BITRATE_MARGIN` (1.1) | 不进 NVENC，直接 concat copy；计入熔断计数 |
-| 2. 运行时迟滞监控 | `ffmpeg_runner._run_ffmpeg_capturing_warnings` | warmup 30s 后，`predicted_final_ratio` 跨进 0.95 → WARN；持续 20s 仍 > 1.0 → 中断 | `proc.terminate()` → 哨兵 `rc = NEGATIVE_COMPRESSION_ABORT_RC (-2)`，调用方删 temp 走 concat copy |
-| 3. Post-run 兜底 | `compress.py` / `merge.py` 成功路径 | 跑完一切正常，但 `out_size > in_size` | 删产物，concat copy fallback |
-| 4. 文件夹级熔断 | `pipeline.py` | 同一文件夹累计 `NEGATIVE_COMPRESSION_FOLDER_BREAKER` (5) 次反向膨胀 | 本文件夹剩余组 `enable_compress=False` |
+| 1. Pre-flight 码率预检 | `merge.py` 入口（旧通用 margin 逻辑，已被 codec-aware preflight 覆盖；保留给单文件路径兼容） | 输入平均码率 < `profile.bitrate × PREFLIGHT_BITRATE_MARGIN` (1.1) | 不进 NVENC，直接 concat copy |
+| 2. 运行时迟滞监控 | `ffmpeg_runner._run_ffmpeg_capturing_warnings` | warmup 30s 后，`predicted_final_ratio` 跨进 0.95 → WARN；持续 20s 仍 > 1.0 → 中断 | `proc.terminate()` → 哨兵 `rc = NEGATIVE_COMPRESSION_ABORT_RC (-2)`，调用方删 temp 走 concat copy；**计 breaker** |
+| 3. Post-run 兜底 | `compress.py` / `merge.py` 成功路径 | 跑完一切正常，但 `out_size > in_size` | 删产物，concat copy fallback；**计 breaker** |
+| 4. 文件夹级熔断 | `pipeline.py` | 同一文件夹累计 `NEGATIVE_COMPRESSION_FOLDER_BREAKER` (5) 次**真实**反向膨胀（仅第 2/3 层算，规则 skip 不算） | 本文件夹剩余组 `enable_compress=False` |
 
-阈值集中在 `config.py::NEGATIVE_COMPRESSION_THRESHOLDS` 与同名常量，需要调整在那里改。
+阈值集中在 `config.py::NEGATIVE_COMPRESSION_THRESHOLDS`、`H264_TARGET_RATIO`、`X265_DEFAULT_CRF` 与同名常量。
 
 ## 缓存机制
 
