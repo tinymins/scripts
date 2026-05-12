@@ -521,14 +521,27 @@ def _run_ffmpeg_capturing_warnings(cmd, mode: str = "compress", verbose: bool = 
                 parts.append(bar)
                 parts.append(pct_str)
 
-                # 字节量：按进度百分比折算 input 消耗量
+                # 字节量：按进度百分比折算 input 消耗量；并加 output 实测 + 实时压缩比
                 if expected_input_bytes:
                     processed_bytes = int(expected_input_bytes * pct / 100.0)
-                    parts.append(_color(
-                        f"{format_size(processed_bytes).replace(' ', '')}"
-                        f"/{format_size(expected_input_bytes).replace(' ', '')}",
-                        _C_CYAN,
-                    ))
+                    cur_out_bytes = _parse_ffmpeg_size_to_bytes(progress.get("size", ""))
+                    in_disp = format_size(processed_bytes).replace(' ', '')
+                    total_disp = format_size(expected_input_bytes).replace(' ', '')
+                    parts.append(_color(f"{in_disp}/{total_disp}", _C_CYAN))
+                    if cur_out_bytes is not None and processed_bytes > 0:
+                        out_disp = format_size(cur_out_bytes).replace(' ', '')
+                        ratio = cur_out_bytes / processed_bytes
+                        saving_pct = (1.0 - ratio) * 100.0
+                        arrow = "↓" if saving_pct >= 0 else "↑"
+                        ratio_seg = f"→{out_disp}{arrow}{abs(saving_pct):.0f}%"
+                        # warmup：开头 30s 或 进度 < 5% 时用灰色（统计噪声大不可信）
+                        is_warmup = (elapsed_s < 30.0) or (pct < 5.0)
+                        if is_warmup:
+                            parts.append(_color(ratio_seg, _C_GRAY))
+                        elif ratio > 1.0:
+                            parts.append(_color(ratio_seg, _C_RED, bold=True))
+                        else:
+                            parts.append(_color(ratio_seg, _C_GREEN))
             else:
                 spin = _SPINNER_FRAMES[state["spinner_idx"] % len(_SPINNER_FRAMES)]
                 state["spinner_idx"] += 1
