@@ -62,6 +62,8 @@ def process_videos_in_folder(
     max_group_duration_seconds=None,
     dry_run=False,
     overwrite=False,
+    encoder: str = "nvenc",
+    x265_crf=None,
 ):
     video_files = []
     other_files = []
@@ -201,6 +203,8 @@ def process_videos_in_folder(
                         verbose_ffmpeg=verbose_ffmpeg,
                         verbose_cmd=verbose_cmd,
                         src_folder=src_folder,
+                        encoder=encoder,
+                        x265_crf=x265_crf,
                     )
                 except Exception as exc:  # 单组兜底，不影响后续组
                     import traceback
