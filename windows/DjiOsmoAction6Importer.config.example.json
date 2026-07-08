@@ -1,0 +1,12 @@
+{
+  "destinations": [
+    {
+      "name": "OsmoAction6-user",
+      "path": "\\\\server\\share\\Pictures\\DJI Devices\\OsmoAction6-user"
+    },
+    {
+      "name": "OsmoAction5P-user",
+      "path": "\\\\server\\share\\Pictures\\DJI Devices\\OsmoAction5P-user"
+    }
+  ]
+}
