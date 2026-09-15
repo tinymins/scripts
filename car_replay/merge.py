@@ -245,7 +245,8 @@ def merge_videos(video_group, combined_file, enable_compress=False, cq_override=
     camera_id = extract_camera_id(_basename(video_group[0]))
 
     # 预扫健康度：任一输入文件不健康则该组改走 -c copy
-    if enable_compress and duration_resolver is not None:
+    # --force-encode 显式要求强制编码（用于测试编码器），bypass 该健康检查
+    if enable_compress and duration_resolver is not None and not force_encode:
         unhealthy = [v for v in video_group if duration_resolver.is_healthy(v) is False]
         if unhealthy:
             console.warn(
