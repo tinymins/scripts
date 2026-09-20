@@ -158,6 +158,14 @@ After writing code, run the narrowest checks that prove the changed behavior and
 - Stage and commit only changes that belong to the current task. Preserve unrelated or pre-existing working-tree changes.
 - Do not push commits unless the user explicitly requests it.
 
+### 6.3 CI Follow-up After Push
+
+- When `git push` is the requested delivery boundary, verify that the expected CI workflow or pipeline was created for the exact pushed commit, report that trigger evidence, and stop the task. Do not wait for CI completion, follow live logs, repeatedly poll status, or emit unchanged CI updates.
+- Continue waiting only when the user explicitly asks to debug CI, or when the requested outcome includes downstream work that depends on CI output, such as building an artifact and then deploying, publishing, installing, or otherwise processing it.
+- In those exception cases, perform one initial check to confirm the CI run and associate it with the pushed commit. After that, use sparse backoff: wait 1 minute before the next check, then 5 minutes, then 10 minutes, and thereafter 10 minutes between checks.
+- Use a quiet wait mechanism rather than a busy loop. Check compact status first; fetch detailed logs only after a failure or when diagnosis requires them.
+- CI waiting is not active work for the progress-update cadence in section 4.3. Between checks, emit no heartbeat messages. Report only a meaningful state change, completion, failure, or required user action.
+
 ## 7. Information Presentation
 
 Convey information using charts, diagrams, and tables instead of dense blocks of text. Follow these standards based on the data type:
