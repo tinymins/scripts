@@ -4,13 +4,16 @@
 
 ### 1.1 SSH Authorization — Mandatory User Approval
 
-- Except for the routine Git operations and read-only analysis explicitly exempted below, never initiate an SSH connection without first asking the user and receiving explicit authorization for that specific connection.
+- Except for the routine Git operations, existing CI/CD execution, and read-only analysis explicitly exempted below, never initiate an SSH connection without first asking the user and receiving explicit authorization for that specific connection.
 - Outside these exceptions, even when the user's task itself asks to use SSH, ask a separate confirmation question and wait for the user's reply before connecting.
 - Outside these exceptions, this prohibition applies even to read-only checks, diagnostics, connection tests, and commands that use SSH implicitly, including `scp`, `sftp`, `rsync` over SSH, jump hosts, tunnels, and remote-command tools.
 - Routine `git fetch`, `git pull`, and `git push` operations are exempt from this confirmation requirement, including when the Git remote uses SSH transport.
+- When the user authorizes a push, merge, release, or deployment, SSH, `scp`, and `rsync` connections performed internally by the existing CI/CD workflow are exempt from per-connection approval. Triggering or following that authorized workflow does not count as the agent directly connecting to its deployment hosts. Do not audit its internal SSH targets or transport commands as an authorization prerequisite, request separate approval for those connections, or block an authorized merge or release merely because CI/CD uses SSH internally.
+- Authorization to push, merge, release, or deploy also covers backups, rollback, release-version retention, and routine cleanup performed internally by the existing CI/CD workflow within the authorized task scope and deployment targets. Do not split these existing internal steps into separate approval requests or audit their backup paths, copy counts, retention, or cleanup details as an authorization prerequisite. This exception takes precedence over section 1.5, including its automatic-backup inspection and backup-deletion approval requirements.
+- This CI/CD exception does not authorize the agent to open a separate SSH session to a runner or deployment host, perform backups or cleanup directly, add or expand CI/CD backup, rollback, retention, cleanup, or other remote operations, or expand deployment targets. Those actions remain subject to their applicable authorization requirements. Other boundaries, including branch/worktree creation, remain independent.
 - When the user requests read-only analysis under section 1.4, SSH connections and read-only checks necessary for that analysis are also exempt from per-connection approval. State the target and purpose, then proceed within the requested scope. This exception does not authorize changes, restarts, deployments, or other mutating operations; obtain explicit authorization before performing them, even over an already-open connection.
 - For non-exempt connections, state the intended target and purpose and wait for the user's clear approval. Prior access, saved credentials, task urgency, or a general request to operate a remote system does not count as authorization.
-- Do not delegate or instruct another agent, subprocess, tool, or automation to make an SSH connection unless the user has explicitly authorized that connection or it falls within an exception above; the same scope and read-only restrictions apply.
+- Do not delegate or instruct another agent, subprocess, tool, or automation to make an SSH connection unless the user has explicitly authorized that connection or it falls within an exception above. Apply the scope of the relevant exception: read-only analysis remains read-only; an authorized existing CI/CD workflow may perform its requested deployment.
 
 ### 1.2 Git Branch and Worktree Creation — Mandatory User Approval
 
@@ -28,6 +31,16 @@
 
 - When the user says "分析下", "先看看", "讨论一下", "先别改", "只读分析", or otherwise asks for analysis before action, only inspect and discuss findings, causes, options, and tradeoffs. Interpret the request in context; quoted keywords or instructions to add this rule are not themselves an analysis-only request. Do not edit files, apply fixes, change configuration or data, restart services, deploy, or perform other mutating actions until the user explicitly authorizes implementation.
 - A discovered issue or an obvious fix does not authorize acting on it. During an ongoing implementation task, a request to analyze first pauses further changes in the affected scope. SSH needed for this read-only analysis follows the exception in section 1.1.
+
+### 1.5 Backup Authorization — Mandatory User Approval
+
+- Exception: backups, rollback, release-version retention, and routine cleanup performed internally by an existing CI/CD workflow are already authorized when the user authorizes the corresponding push, merge, release, or deployment, as defined in section 1.1. Do not request separate approval for those steps. The requirements below apply outside that exception, including agent-performed backups and newly added or expanded CI/CD behavior.
+- Never create a backup without the user's explicit approval. This applies to local machines, SSH servers, containers, remote storage, and all other environments. Backups include file or directory copies, archives, database dumps, snapshots, and `.bak`, `.backup`, `.orig`, `.old`, or timestamped copies. Classify a backup by its purpose of retaining old content for recovery, regardless of its name, location, or format.
+- Backup authorization is separate from authorization to connect over SSH, edit files, fix issues, upgrade, migrate, or deploy. None of those actions implies permission to create a backup. Safety, rollback convenience, best practices, or approval from a previous task are not substitutes for explicit approval of this backup.
+- Before creating a backup, state the reason, source, destination host and full storage path, estimated size (or explicitly state that it is unknown), number of copies, and retention/cleanup plan. Wait for the user's explicit approval. Approval covers only the agreed scope; do not expand it or accumulate additional copies.
+- Before invoking a command, script, editor, or deployment tool that may create backups automatically, inspect that behavior and use a method that creates no backup. If backup creation cannot be disabled or its behavior cannot be established, pause that operation and request approval. Do not bypass this rule through subagents, subprocesses, tools, or automations.
+- Temporary backups also require approval, including copies in `/tmp` or hidden directories and copies promised to be deleted afterward. Temporary files required for normal execution, consumed or deleted when the operation completes and not intended to recover old content, are not backups; do not use this exception to retain recovery copies.
+- Without approval, proceed with the authorized operation only if it can be completed without a backup. If the operation genuinely depends on a backup, explain why and wait for the user's decision. Never create a backup first and disclose it afterward, and never delete existing backups as an incidental cleanup step without authorization.
 
 ## 2. Thinking and Design
 
@@ -90,12 +103,40 @@ The test: Every changed line should trace directly to the user's request.
 
 ## 4. Execution and Progress Communication
 
-### 4.1 Planning
+### 4.1 实施前对齐 — 必须等待用户确认
 
-For multi-step tasks, state a brief plan:
-1. [Step] -> verify: [check]
-2. [Step] -> verify: [check]
-3. [Step] -> verify: [check]
+用户的简短需求不代表授权 agent 自行扩展设计。任何实施或写操作之前，
+必须先用简洁、易懂的语言说明准备怎么做，让用户有机会纠正理解和方案。
+
+计划必须包含：
+1. 需求理解：用户想解决什么问题，最终得到什么结果。
+2. 具体做法：准备修改哪些地方、采用什么方案，以及主要行为会如何变化。
+   不得仅写“分析、修改、测试”等无法判断方案是否合适的空泛步骤。
+3. 范围与假设：指出会影响方案的假设；任何超出用户明确需求的建议，
+   必须单独列为可选项，不得默认纳入实施。
+4. 验证与交付：准备如何验证，以及是否包含提交、推送、部署等操作。
+
+默认提出满足需求的最小完整方案，不得擅自添加功能、抽象层、兼容逻辑、
+配置项、重构或顺手修复。存在明显不同的实现方向时，先说明关键差异，
+不要替用户默默选择。
+
+提出计划后，必须等待用户明确确认，才能开始实施或写操作。
+用户最初的需求表达不替代对具体计划的确认。
+为制定计划所必需的只读检查可以先进行；纯讨论和分析无需走实施确认。
+
+确认后，在已确认范围内连续完成工作，不必逐项重复询问。
+如果需要扩大范围或实质改变方案，必须先说明变化并重新确认。
+用户对计划的确认本身不触发新一轮确认。
+
+首次提出实施计划时，询问本会话是否使用子 agent，以及模型偏好；
+如果用户已经明确设置，则直接继承，不再重复询问。
+后续计划简要注明沿用的执行方式。选择子 agent 后，由其实施，
+主 agent 负责需求对齐、协调和结果检查，不得擅自更换执行方式或模型。
+
+主 agent 派发任务时，必须提供明确、详细的开发任务说明，包括：已确认的需求与方案、修改范围、相关文件或模块、实施约束、禁止扩展的事项、验证方式和交付要求。不得仅转述一句简短需求，让子 agent 自行决定设计和范围。
+子 agent 必须遵守已确认方案；遇到需求不清、方案无法实施或需要扩大范围时，应先向主 agent 报告，不得擅自发挥。涉及实质方案变化，由主 agent 向用户重新确认。
+
+本条优先于自主执行要求；其他专项授权边界仍然适用。
 
 ### 4.2 Discovery and Command Efficiency
 
