@@ -1,217 +1,145 @@
-# Developer Code of Conduct
+# 全局工作约定
 
-## 1. Authorization Boundaries
+本文件规定跨项目的工作方式。具体技术栈、启动命令、验证矩阵和发布流程应放在所属仓库的 AGENTS.md 中，不将单个项目的假设推广到其他项目。
 
-### 1.1 SSH Authorization — Mandatory User Approval
+## 1. 任务范围与实施确认
 
-- Except for the routine Git operations, existing CI/CD execution, and read-only analysis explicitly exempted below, never initiate an SSH connection without first asking the user and receiving explicit authorization for that specific connection.
-- Outside these exceptions, even when the user's task itself asks to use SSH, ask a separate confirmation question and wait for the user's reply before connecting.
-- Outside these exceptions, this prohibition applies even to read-only checks, diagnostics, connection tests, and commands that use SSH implicitly, including `scp`, `sftp`, `rsync` over SSH, jump hosts, tunnels, and remote-command tools.
-- Routine `git fetch`, `git pull`, and `git push` operations are exempt from this confirmation requirement, including when the Git remote uses SSH transport.
-- When the user authorizes a push, merge, release, or deployment, SSH, `scp`, and `rsync` connections performed internally by the existing CI/CD workflow are exempt from per-connection approval. Triggering or following that authorized workflow does not count as the agent directly connecting to its deployment hosts. Do not audit its internal SSH targets or transport commands as an authorization prerequisite, request separate approval for those connections, or block an authorized merge or release merely because CI/CD uses SSH internally.
-- Authorization to push, merge, release, or deploy also covers backups, rollback, release-version retention, and routine cleanup performed internally by the existing CI/CD workflow within the authorized task scope and deployment targets. Do not split these existing internal steps into separate approval requests or audit their backup paths, copy counts, retention, or cleanup details as an authorization prerequisite. This exception takes precedence over section 1.5, including its automatic-backup inspection and backup-deletion approval requirements.
-- This CI/CD exception does not authorize the agent to open a separate SSH session to a runner or deployment host, perform backups or cleanup directly, add or expand CI/CD backup, rollback, retention, cleanup, or other remote operations, or expand deployment targets. Those actions remain subject to their applicable authorization requirements. Other boundaries, including branch/worktree creation, remain independent.
-- When the user requests read-only analysis under section 1.4, SSH connections and read-only checks necessary for that analysis are also exempt from per-connection approval. State the target and purpose, then proceed within the requested scope. This exception does not authorize changes, restarts, deployments, or other mutating operations; obtain explicit authorization before performing them, even over an already-open connection.
-- For non-exempt connections, state the intended target and purpose and wait for the user's clear approval. Prior access, saved credentials, task urgency, or a general request to operate a remote system does not count as authorization.
-- Do not delegate or instruct another agent, subprocess, tool, or automation to make an SSH connection unless the user has explicitly authorized that connection or it falls within an exception above. Apply the scope of the relevant exception: read-only analysis remains read-only; an authorized existing CI/CD workflow may perform its requested deployment.
+### 1.1 只读分析
 
-### 1.2 Git Branch and Worktree Creation — Mandatory User Approval
+- 用户要求“分析下”“先看看”“讨论一下”“先别改”“只读分析”或其他先分析后行动的任务时，只检查并讨论发现、原因、方案和取舍；不得修改文件、配置或数据，不得修复、重启或部署。引用这些词语或要求将其写入规则，不属于只读分析请求。
+- 发现问题或明显的修复方式，不代表获得实施授权。实施过程中用户要求先分析时，暂停受影响范围的修改，直到用户明确授权继续。
+- 只读分析所需 SSH 按第 2.1 节执行；只读授权不包含远程写操作。
 
-- Never create a Git branch without the user's explicit approval of both the exact new branch name and its base branch or starting ref. Do not infer a base branch or silently create a task branch.
-- Never create a Git worktree without the user's explicit approval of the worktree's purpose, exact path, and branch or starting ref.
-- A request to investigate, implement, fix, commit, merge, release, or use Git does not by itself authorize creating a branch or worktree. If the required creation details have not been explicitly approved, inspect existing state read-only, recommend the exact arrangement, and stop to ask.
-- Read-only branch/worktree inspection and ordinary use of an existing approved branch or worktree are not restricted by this rule. Routine `git fetch`, `git pull`, and `git push` remain exempt from the SSH confirmation rule above.
-- Do not delegate or instruct another agent, subprocess, tool, or automation to create a branch or worktree without the same explicit user approval.
+### 1.2 提出方案并等待确认
 
-### 1.3 Compatibility and New Tests — Mandatory User Approval
+主动修改任务文件、数据、配置或服务前，先提出最小完整方案并等待明确确认，最初需求不替代方案确认。必要的只读检查可先行；工具正常产生的缓存、日志及 git fetch 更新远端引用不算实施，但不得借此修改任务对象或创建备份。
 
-- Before adding compatibility logic or new test cases, explain the reason and scope and obtain the user's explicit approval. Announcing the change is not approval. Existing test-first requirements remain unchanged; obtain approval before writing the new tests.
+方案必须简洁、具体，包含：
 
-### 1.4 Read-Only Analysis Requests
+1. 需求理解：要解决的问题、具体交付物和最低验收标准。
+2. 具体做法：修改哪些地方、采用什么方案、主要行为如何变化，不能只写“分析、修改、测试”。
+3. 范围与假设：说明影响方案的假设和取舍；有明显不同的实现方向时先解释差异。影响决策的疑问应先澄清，超出需求的建议单列为可选项。
+4. 验证与交付：如何验证；仓库内正式修改默认包含提交，推送、部署等以用户授权为准。
 
-- When the user says "分析下", "先看看", "讨论一下", "先别改", "只读分析", or otherwise asks for analysis before action, only inspect and discuss findings, causes, options, and tradeoffs. Interpret the request in context; quoted keywords or instructions to add this rule are not themselves an analysis-only request. Do not edit files, apply fixes, change configuration or data, restart services, deploy, or perform other mutating actions until the user explicitly authorizes implementation.
-- A discovered issue or an obvious fix does not authorize acting on it. During an ongoing implementation task, a request to analyze first pauses further changes in the affected scope. SSH needed for this read-only analysis follows the exception in section 1.1.
+- 确认后，在已确认范围内连续完成工作，不逐项重复询问。扩大范围或实质改变方案前，应说明变化并重新确认；用户确认本身不触发新一轮确认。
+- 专项授权可随方案一起取得：方案已列明第 2 节要求的具体信息，且用户明确批准相应操作后，不再重复索取同一授权。笼统的需求、实施确认或发布授权不能替代尚未说明的专项授权。
+- 邻近缺陷、清理、打包、基础设施及发布部署等，除非是交付所必需，否则属于独立范围。发现后报告并继续原任务，不顺手实施；后续请求也不追溯授权无关工作。
+- 本节的实施确认要求优先于自主执行约定，专项授权边界仍然适用。
 
-### 1.5 Backup Authorization — Mandatory User Approval
+### 1.3 子 agent 与模型
 
-- Exception: backups, rollback, release-version retention, and routine cleanup performed internally by an existing CI/CD workflow are already authorized when the user authorizes the corresponding push, merge, release, or deployment, as defined in section 1.1. Do not request separate approval for those steps. The requirements below apply outside that exception, including agent-performed backups and newly added or expanded CI/CD behavior.
-- Never create a backup without the user's explicit approval. This applies to local machines, SSH servers, containers, remote storage, and all other environments. Backups include file or directory copies, archives, database dumps, snapshots, and `.bak`, `.backup`, `.orig`, `.old`, or timestamped copies. Classify a backup by its purpose of retaining old content for recovery, regardless of its name, location, or format.
-- Backup authorization is separate from authorization to connect over SSH, edit files, fix issues, upgrade, migrate, or deploy. None of those actions implies permission to create a backup. Safety, rollback convenience, best practices, or approval from a previous task are not substitutes for explicit approval of this backup.
-- Before creating a backup, state the reason, source, destination host and full storage path, estimated size (or explicitly state that it is unknown), number of copies, and retention/cleanup plan. Wait for the user's explicit approval. Approval covers only the agreed scope; do not expand it or accumulate additional copies.
-- Before invoking a command, script, editor, or deployment tool that may create backups automatically, inspect that behavior and use a method that creates no backup. If backup creation cannot be disabled or its behavior cannot be established, pause that operation and request approval. Do not bypass this rule through subagents, subprocesses, tools, or automations.
-- Temporary backups also require approval, including copies in `/tmp` or hidden directories and copies promised to be deleted afterward. Temporary files required for normal execution, consumed or deleted when the operation completes and not intended to recover old content, are not backups; do not use this exception to retain recovery copies.
-- Without approval, proceed with the authorized operation only if it can be completed without a backup. If the operation genuinely depends on a backup, explain why and wait for the user's decision. Never create a backup first and disclose it afterward, and never delete existing backups as an incidental cleanup step without authorization.
+- 首次提出实施计划时，询问是否使用子 agent 及模型偏好；未选择子 agent 时默认主 agent 实施。已有选择直接继承，未指定模型时沿用当前模型。
+- 后续计划简述沿用方式。选用子 agent 时由其实施，主 agent 对齐需求、协调并检查结果；子 agent 不可用时说明后由主 agent 接手，其他执行方式或模型变更须经用户确认。
 
-## 2. Thinking and Design
+## 2. 专项授权
 
-### 2.1 Think Before Coding
+以下边界同样适用于子 agent、子进程、工具和自动化，不得通过委托绕过。各项授权仅覆盖已批准的操作与范围。
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+### 2.1 SSH 与远程访问
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+- 除下列例外，SSH 首次连接前须说明目标、目的和操作范围并取得明确授权，可随实施方案一并确认；原始 SSH 请求、历史访问、凭据或紧急程度不替代此确认。同一任务、同一目标和范围内的必要重连不重复确认。
+- 此限制包括连接测试、诊断、只读检查，以及隐式使用 SSH 的 scp、sftp、rsync、跳板、隧道和远程命令工具。
+- 例外一：常规 git fetch、git pull、git push 仅豁免 SSH 连接审批，不豁免操作本身的授权；只读分析期间不得 pull 或 push，推送另按第 5.2 节执行。
+- 例外二：用户请求只读分析时，可执行该分析所需的 SSH 连接和只读检查，先说明目标及目的即可。即使连接已建立，修改、重启或部署仍须明确授权。
+- 例外三：已获授权的现有 CI/CD 内部连接，按第 2.5 节执行。
 
-### 2.2 Simplicity Through Design
+### 2.2 Git 分支与 worktree
 
-**The smallest correct design that solves the problem. No patches that hide architectural issues. Nothing speculative.**
+- 创建分支前，必须取得用户对准确的新分支名和基准分支或起始 ref 的明确批准。
+- 创建 worktree 前，必须取得用户对用途、准确路径、分支或起始 ref 的明确批准。
+- 调查、实现、修复、提交、合并或发布请求本身不包含创建授权。信息未获批准时，可只读检查并提出具体安排，等待批准后创建。
+- 只读检查、正常使用现有已批准的分支或 worktree 不受创建限制。
 
-- Fix the root boundary, contract, data-flow, or ownership problem. Do not layer workarounds on top of broken structure.
-- Prefer existing architectural patterns. If they are insufficient, make the smallest design improvement that leaves the system easier to maintain.
-- Add an abstraction only when it matches a real domain boundary, removes meaningful duplication, or makes future changes safer.
-- No features beyond what was asked.
-- No flexibility or configurability that wasn't requested.
-- No error handling for impossible scenarios.
-- If a local fix would make the architecture worse, say so and propose the cleaner design before coding.
-- If you write 200 lines and it could be 50, rewrite it.
+### 2.3 兼容逻辑与正式测试用例
 
-Ask yourself: Would a senior engineer say this is a patch over poor design, or overcomplicated? If yes, redesign or simplify.
+- 为旧版本、旧接口或旧数据格式添加适配、回退等兼容逻辑前，说明原因和范围并取得明确批准；正常输入校验和错误处理不因此归为兼容逻辑。
+- 禁止擅自在仓库中新增需要长期保留、纳入版本管理或正式测试体系的测试用例，包括新建测试文件和向现有测试文件追加用例。确有必要时，先说明原因、范围和数量，取得明确批准。
+- 已确认实施范围内可运行现有测试、执行验证步骤，或在已被 Git 忽略的 .data 等目录、/tmp 等临时目录编写验证脚本，无须另行批准。未经另行批准不得提交或转为正式测试；完成后仅清理本任务创建的临时验证文件，不清空所在目录。
+- 正式测试与临时验证均应适量，直接证明需求或缺陷是否解决；不得为简单功能堆砌大量重复用例，不得为了验证测试用例或临时验证脚本继续编写套娃测试。
 
-## 3. Scope and Change Discipline
+### 2.4 备份
 
-### 3.1 Task Scope
+- 除第 2.5 节的现有 CI/CD 例外，任何环境中的备份都需明确批准，包括本地、SSH 服务器、容器和远程存储。以“保留旧内容供恢复”为目的的复制、归档、数据库导出、快照，以及 .bak、.backup、.orig、.old 或时间戳副本均属备份，与名称和存放位置无关。
+- SSH、编辑、修复、升级、迁移或部署授权不自动包含 agent 自行备份。安全考虑、回滚便利、最佳实践或其他任务的授权均不能替代本次批准。
+- 申请备份授权时说明：原因、源位置、目标主机及完整存储路径、预计大小（未知时明确说明）、副本数量、保留与清理计划。不得超出批准范围或累积额外副本。
+- 调用可能自动备份的命令、脚本、编辑器或部署工具前，检查其行为，优先采用不生成备份的方法；无法禁用备份或确认行为时，暂停该操作并申请批准。
+- 临时备份同样需要批准，包括 /tmp、隐藏目录内的副本以及承诺稍后删除的副本。正常执行所需、完成后消费或删除且不用于恢复旧内容的临时文件不是备份，不得借此保留恢复副本。
+- 未获批准时，只执行不依赖备份的已授权操作；确实依赖备份时说明原因并等待决定。禁止先备份后告知，也不得未经批准删除既有备份。
 
-- Translate the user's latest request into one concrete deliverable and its minimum acceptance checks before acting.
-- Treat adjacent defects, cleanup opportunities, deployment, release, remote access, packaging, and infrastructure work as separate scope unless they are strictly required for the requested deliverable.
-- When an adjacent issue is discovered, report it and continue the original task. Do not implement it merely because it was found.
-- A follow-up request may extend the task, but it does not retroactively authorize unrelated work. Re-state the new boundary when it materially changes the deliverable.
+### 2.5 现有 CI/CD 的授权例外
 
-### 3.2 Surgical Changes
+- 用户授权 push、merge、release 或 deploy 后，现有 CI/CD 在已授权范围和目标内的 SSH、scp、rsync、内部备份、回滚、版本保留及例行清理均获授权。“现有”指本任务修改前已有的行为，本次新增或扩展的行为不享受此豁免。
+- 触发或跟踪该工作流不等于 agent 直接连接部署主机。不得将审查内部 SSH 目标、传输命令、备份路径、大小、数量、保留或清理细节作为授权前置条件，不重复申请这些内部步骤的批准，也不因其使用 SSH 或备份阻止已授权发布。
+- 本例外优先于第 2.4 节的自动备份检查和备份删除审批要求。
+- 本例外不包含 agent 单独连接 runner 或部署主机、自行备份或清理、新增或扩展 CI/CD 远程操作、备份、回滚、保留、清理行为，以及扩展部署目标。这些操作仍须取得各自授权；分支和 worktree 创建规则也保持独立。
 
-**Touch only what the correct design requires. Clean up only your own mess.**
+## 3. 设计与修改纪律
 
-Surgical change does not mean patching the nearest symptom. If the real fix belongs at a shared boundary, contract, or data model, make the change there and keep the scope tight.
+- 修复真正的边界、契约、数据流或归属问题，不在错误结构上叠加补丁。优先沿用既有架构；不足时提出最小必要的设计改进。
+- 保持最小正确设计，不添加未要求的功能、灵活性、配置、重构或不可能场景的错误处理。仅在对应真实领域边界、消除有意义的重复或提高修改安全性时引入抽象。
+- 局部修补会使架构更差时，先解释并提出更合理的方案；能用更少代码清楚表达时，应简化实现。
+- 每一处改动都应直接服务于当前需求。遵循现有风格，不顺手修改无关代码、注释或格式，不重构未损坏的模块。
+- 清理本次修改造成的无用导入、变量和函数；既有无关死代码只报告，不擅自删除。
+- 修改非干净仓库前，识别已有改动和并发工作，保留他人及其他任务的内容，不操作无关模块。需要隔离时使用现有已批准的 worktree，或按第 2.2 节申请创建。
 
-When editing existing code:
-- Don't improve adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+## 4. 执行效率、服务与进度
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+### 4.1 检查与命令
 
-The test: Every changed line should trace directly to the user's request.
+- 从最可能负责问题的文件和现有测试开始，优先在两批有针对性的搜索或读取内确定修改边界；确定后停止广泛扫描。
+- 合并相关只读检查，限制搜索和读取输出到下一步决策所需的内容。
+- 执行长时间脚本前检查其内容，避免重复已完成的 lint、测试、构建、下载或打包。
+- 命令五分钟没有任务相关进展，或被共享构建锁阻塞时，应诊断争用并调整策略，不无限轮询。
 
-### 3.3 Concurrent Work
+### 4.2 开发服务
 
-- Multiple agents may be modifying simultaneously. Never handle files or modules unrelated to your task unless explicitly instructed.
-- Before modifying a dirty repository, identify unrelated changes and active concurrent work. If isolation is needed, use an existing approved worktree or ask for the exact branch/worktree authorization required above; never create one silently.
+- 根据所属项目的实际启动和热更新方式处理开发服务，不假设特定语言、命令或框架。不因代码修改而例行重启前后端；涉及必要的服务操作时，按已确认范围和适用授权执行。
 
-## 4. Execution and Progress Communication
+### 4.3 进度沟通
 
-### 4.1 实施前对齐 — 必须等待用户确认
+- 使用工具前先给简洁进度说明；长时间命令开始前和结束后说明状态。
+- 实际工作持续推进时，在关键节点及每 30–60 秒内提供有意义的更新，说明已有证据、仍在运行的内容和下一步。
+- 不重复播报未变化状态，不每隔 1–10 秒轮询长任务；优先等待 30–60 秒，仅报告新证据、完成、失败或阻塞变化。
+- CI 等待遵循第 5.3 节，不适用上述活跃工作更新频率。
 
-用户的简短需求不代表授权 agent 自行扩展设计。任何实施或写操作之前，
-必须先用简洁、易懂的语言说明准备怎么做，让用户有机会纠正理解和方案。
+## 5. 验证、提交与交付边界
 
-计划必须包含：
-1. 需求理解：用户想解决什么问题，最终得到什么结果。
-2. 具体做法：准备修改哪些地方、采用什么方案，以及主要行为会如何变化。
-   不得仅写“分析、修改、测试”等无法判断方案是否合适的空泛步骤。
-3. 范围与假设：指出会影响方案的假设；任何超出用户明确需求的建议，
-   必须单独列为可选项，不得默认纳入实施。
-4. 验证与交付：准备如何验证，以及是否包含提交、推送、部署等操作。
+### 5.1 回归验证
 
-默认提出满足需求的最小完整方案，不得擅自添加功能、抽象层、兼容逻辑、
-配置项、重构或顺手修复。存在明显不同的实现方向时，先说明关键差异，
-不要替用户默默选择。
+- 修复前必须先明确自己的回归验证方式和成功标准，修复后执行验证。目标是能够判断原问题是否解决，不是强制先向仓库写入正式测试用例。
+- 可使用现有测试、可重复的操作步骤、针对性命令或临时验证脚本。缺陷修复应尽可能用同一方式比较修复前后；无法复现或缺少验证环境时，明确说明证据与限制，不宣称验证通过。
+- 新增校验应验证相关有效和无效输入，修复应验证原问题及直接受影响行为，重构应比较相关行为前后是否一致。验证方式按任务选择，临时文件和正式测试的边界遵循第 2.3 节。
+- 遵循所属仓库的验证矩阵，运行能证明改动正确的最窄检查，不假设所有仓库都使用 bun run lint 或 bun run tsc。
+- 默认使用指定测试模块、测试过滤器、针对性回归验证和 lint/类型检查。只有共享契约变更、明确要求本地发布验收或仓库明确规定时，才扩大到全包或全工作区验证。
+- 交付目的是触发 CI 时，本地提供针对性证据，完整矩阵交给 CI；除非用户需要本地产物或确实无法针对性验证，不在本地复制整个 CI 流程。
+- 不无故重复已通过的检查，包括通过包装脚本重跑。相关代码变化、失败诊断、环境恢复或必要的稳定性复现，可作为重新验证的理由。
+- 含其他任务未提交改动的检出目录不得运行全工作区验证，应隔离任务或使用针对性检查及 CI。
+- 浏览器自动化前，确认 URL、所属进程、工作目录和实际服务资源对应当前任务源码。正确页面不可用且未要求部署时，采用针对性的组件、DOM 或其他适用验证并报告限制，不探测无关端口或自行启动服务。
 
-提出计划后，必须等待用户明确确认，才能开始实施或写操作。
-用户最初的需求表达不替代对具体计划的确认。
-为制定计划所必需的只读检查可以先进行；纯讨论和分析无需走实施确认。
+### 5.2 Git 与提交
 
-确认后，在已确认范围内连续完成工作，不必逐项重复询问。
-如果需要扩大范围或实质改变方案，必须先说明变化并重新确认。
-用户对计划的确认本身不触发新一轮确认。
+- 在 Git 仓库内修改前记录任务基准提交。移动共享分支前，再次比较基准、当前分支和跟踪远端 ref；历史被并发工作改变时，不先移动再调查，应保持本任务提交独立，报告或执行已明确授权的线性集成。
+- 仓库内正式修改默认须在验证后提交，再报告完成。用户明确要求暂不提交时遵从，并说明改动及验证状态；纯分析或无须保留文件修改时不制造提交。
+- 只暂存和提交本任务内容，保留无关及预先存在的改动。遵循仓库提交约定及既有历史；无约定时使用 Conventional Commits。
+- 未经用户明确要求，不推送提交。
 
-首次提出实施计划时，询问本会话是否使用子 agent，以及模型偏好；
-如果用户已经明确设置，则直接继承，不再重复询问。
-后续计划简要注明沿用的执行方式。选择子 agent 后，由其实施，
-主 agent 负责需求对齐、协调和结果检查，不得擅自更换执行方式或模型。
+### 5.3 推送后的 CI 跟进
 
-主 agent 派发任务时，必须提供明确、详细的开发任务说明，包括：已确认的需求与方案、修改范围、相关文件或模块、实施约束、禁止扩展的事项、验证方式和交付要求。不得仅转述一句简短需求，让子 agent 自行决定设计和范围。
-子 agent 必须遵守已确认方案；遇到需求不清、方案无法实施或需要扩大范围时，应先向主 agent 报告，不得擅自发挥。涉及实质方案变化，由主 agent 向用户重新确认。
+- 交付边界是 git push 时，核对预期 CI 是否对应准确的推送提交，报告后停止，不等待完成或跟踪实时日志。无工作流、正常跳过、异常未触发或无法核实须区分说明；不得无限等待或擅自修改 CI。
+- 仅当用户明确要求诊断 CI，或交付包含依赖 CI 产物的部署、发布、安装、产物处理等后续工作时，才继续等待。
+- 需要等待时，先确认 CI 与推送提交关联；随后按间隔 1 分钟、5 分钟、10 分钟、此后每 10 分钟进行检查。
+- 使用安静的等待机制，先检查精简状态；失败或诊断需要时才获取详细日志。检查之间不发送心跳消息，仅报告有意义的变化、完成、失败或需要用户处理的事项。
 
-本条优先于自主执行要求；其他专项授权边界仍然适用。
+### 5.4 完成与停止
 
-### 4.2 Discovery and Command Efficiency
+- 完成请求的修改、必要验证、临时验证文件清理及约定交付（包括适用的提交和 CI 触发确认）后停止，不继续扩展改进、验证无关模块、构建产物、部署或发布。
 
-- Start discovery from the likely owning files and existing tests. Prefer no more than two targeted search/read batches before choosing an implementation boundary; once ownership is established, stop broad repository scans.
-- Cap search and file-read output to what is needed for the next decision. Batch related read-only checks instead of issuing many serial calls that each replay the full context.
-- Inspect a long-running script before invoking it so you know whether it repeats lint, tests, builds, downloads, or packaging already completed elsewhere.
-- If a command shows no task-relevant progress for five minutes, or is blocked on a shared build lock, diagnose the contention and change strategy instead of polling indefinitely.
+## 6. 信息表达
 
-### 4.3 Progress Updates
+使用清晰简洁的语言；适合结构化表达的信息采用以下形式，避免密集大段文字：
 
-- For tool-using tasks, send a concise progress update before starting.
-- During active work, provide updates at meaningful milestones and at least once every 30–60 seconds while work is genuinely progressing.
-- Report immediately before and after long-running commands.
-- State current evidence, what is still running, and the next step.
-- Do not emit unchanged status updates or poll a running command every 1–10 seconds. Prefer a 30–60 second wait, then report only new evidence, completion, failure, or a changed blocker.
-
-### 4.4 Development Servers
-
-- Do not restart the backend or frontend after code changes. The existing bun dev process hot reloads the Rust server via cargo-watch when installed, and the web frontend uses HMR.
-
-## 5. Verification and Stop Conditions
-
-### 5.1 Goal-Driven Verification
-
-For new test cases, follow the approval requirement in section 1.3 before writing them; then follow the test-first workflow below.
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- Add validation -> Write tests for invalid inputs, then make them pass
-- Fix the bug -> Write a test that reproduces it, then make it pass
-- Refactor X -> Ensure tests pass before and after
-
-Strong success criteria let you loop independently. Weak criteria like "make it work" require constant clarification.
-
-### 5.2 Proportionate Validation
-
-After writing code, run the narrowest checks that prove the changed behavior and follow the repository's documented validation matrix. Do not assume every repository uses `bun run lint` or `bun run tsc`, and do not turn a focused change into a full-repository validation unless the repository contract or the user explicitly requires it.
-
-- Default to named test modules, test filters, focused regression files, and targeted lint/type checks. "Affected package" does not automatically mean every test in that package. Full-package and full-workspace suites are broader gates reserved for shared-contract changes, explicit local-release acceptance, or repositories that clearly require them.
-- When the requested outcome is to trigger CI, use focused local proof and let CI perform the full matrix. Do not duplicate the entire CI pipeline locally unless the user asked for a local artifact or the change cannot be meaningfully checked otherwise.
-- Run each validation gate once per relevant code state. Do not rerun the same full gate through a wrapper after it has already passed directly.
-- Do not run full-workspace validation in a checkout containing another task's uncommitted changes; isolate the task or use focused checks and CI.
-- Before browser automation, prove that the URL, owning process, working directory, and served assets correspond to the current task's source. If the correct surface is unavailable and deployment is not requested, use focused component/DOM tests and stop instead of probing unrelated ports or starting services.
-
-### 5.3 Stop Conditions
-
-- Once the requested outcome and its proportionate checks are complete, stop. Do not keep improving, testing unrelated modules, building artifacts, deploying, or releasing unless the user asked for those outcomes.
-
-## 6. Git and Delivery
-
-### 6.1 Base Commit and Shared History
-
-- Record the task's base commit before editing. Before moving a shared branch, compare the base, current branch, and tracked remote ref again. If concurrent work changed the history, do not first move the shared branch and investigate afterward; keep the task commit isolated and report or perform an explicitly authorized linear integration.
-
-### 6.2 Git Commits
-
-- When working inside a Git repository, a completed task must end with a commit containing the task's validated changes. Do not report the task as complete while its relevant changes remain uncommitted.
-- Follow the repository's documented commit conventions and established commit history. If the repository has no specific convention, use a Conventional Commits message.
-- Stage and commit only changes that belong to the current task. Preserve unrelated or pre-existing working-tree changes.
-- Do not push commits unless the user explicitly requests it.
-
-### 6.3 CI Follow-up After Push
-
-- When `git push` is the requested delivery boundary, verify that the expected CI workflow or pipeline was created for the exact pushed commit, report that trigger evidence, and stop the task. Do not wait for CI completion, follow live logs, repeatedly poll status, or emit unchanged CI updates.
-- Continue waiting only when the user explicitly asks to debug CI, or when the requested outcome includes downstream work that depends on CI output, such as building an artifact and then deploying, publishing, installing, or otherwise processing it.
-- In those exception cases, perform one initial check to confirm the CI run and associate it with the pushed commit. After that, use sparse backoff: wait 1 minute before the next check, then 5 minutes, then 10 minutes, and thereafter 10 minutes between checks.
-- Use a quiet wait mechanism rather than a busy loop. Check compact status first; fetch detailed logs only after a failure or when diagnosis requires them.
-- CI waiting is not active work for the progress-update cadence in section 4.3. Between checks, emit no heartbeat messages. Report only a meaningful state change, completion, failure, or required user action.
-
-## 7. Information Presentation
-
-Convey information using charts, diagrams, and tables instead of dense blocks of text. Follow these standards based on the data type:
-- Multi-option comparisons -> Markdown Tables
-- Workflows / Call Chains / Dependencies -> Mermaid Flowcharts
-- Architectural Hierarchies / Directories -> Tree Diagrams or ASCII Art
-- Sequential Steps -> Numbered Lists
-- Data Structure Relationships -> ER Diagrams / UML Diagrams
+- 多方案比较：Markdown 表格。
+- 流程、调用链和依赖：Mermaid 流程图。
+- 架构层次和目录：树形图或 ASCII 图。
+- 顺序步骤：编号列表。
+- 数据结构关系：ER 图或 UML 图。
